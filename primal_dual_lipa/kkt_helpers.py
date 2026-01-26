@@ -1,9 +1,12 @@
-import jax
+"""Provides a helper method for solving the Newton-KKT systems.
 
-import jax.numpy as np
+This relies in the Regularized LQR algorithm.
+"""
 
 from functools import partial
 
+import jax
+from jax import numpy as jnp
 from regularized_lqr_jax.solver import solve, solve_parallel
 
 
@@ -12,22 +15,25 @@ from regularized_lqr_jax.solver import solve, solve_parallel
     static_argnames=("use_parallel_lqr",),
 )
 def solve_kkt(
-    P: np.ndarray,
-    D: np.ndarray,
-    E: np.ndarray,
-    G: np.ndarray,
-    s: np.ndarray,
-    z: np.ndarray,
-    r_x: np.ndarray,
-    r_s: np.ndarray,
-    r_y_dyn: np.ndarray,
-    r_y_eq: np.ndarray,
-    r_z: np.ndarray,
+    P: jnp.ndarray,
+    D: jnp.ndarray,
+    E: jnp.ndarray,
+    G: jnp.ndarray,
+    s: jnp.ndarray,
+    z: jnp.ndarray,
+    r_x: jnp.ndarray,
+    r_s: jnp.ndarray,
+    r_y_dyn: jnp.ndarray,
+    r_y_eq: jnp.ndarray,
+    r_z: jnp.ndarray,
     η: float,
     use_parallel_lqr: bool,
-):
-    """
-    Solves the block-4x4 Newton-KKT linear system
+) -> tuple[
+    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray
+]:
+    """Solve the Newton-KKT linear systems.
+
+    The block-4x4 Newton-KKT linear system is of the form
         [ P       0      C^T      G^T  ] [∆x] = - [ r_x ],
         [ 0   S^{-1} Z    0        I   ] [∆s]     [ r_s ]
         [ C       0    -(1/η)I     0   ] [∆y]     [ r_y ]
@@ -77,28 +83,26 @@ def solve_kkt(
 
 @jax.jit
 def compute_kkt_residual(
-    P: np.ndarray,
-    D: np.ndarray,
-    E: np.ndarray,
-    G: np.ndarray,
-    s: np.ndarray,
-    z: np.ndarray,
-    r_x: np.ndarray,
-    r_s: np.ndarray,
-    r_y_dyn: np.ndarray,
-    r_y_eq: np.ndarray,
-    r_z: np.ndarray,
-    dX: np.ndarray,
-    dU: np.ndarray,
-    dS: np.ndarray,
-    dY_dyn: np.ndarray,
-    dY_eq: np.ndarray,
-    dZ: np.ndarray,
+    P: jnp.ndarray,
+    D: jnp.ndarray,
+    E: jnp.ndarray,
+    G: jnp.ndarray,
+    s: jnp.ndarray,
+    z: jnp.ndarray,
+    r_x: jnp.ndarray,
+    r_s: jnp.ndarray,
+    r_y_dyn: jnp.ndarray,
+    r_y_eq: jnp.ndarray,
+    r_z: jnp.ndarray,
+    dX: jnp.ndarray,
+    dU: jnp.ndarray,
+    dS: jnp.ndarray,
+    dY_dyn: jnp.ndarray,
+    dY_eq: jnp.ndarray,
+    dZ: jnp.ndarray,
     η: float,
-):
-    """
-    Computes the residual of the Newton-KKT system from solve_kkt.
-    """
+) -> jnp.ndarray:
+    """Compute the residual of the Newton-KKT system from solve_kkt."""
     N, x_dim = D.shape[:2]
     Q = P[:, :x_dim, :x_dim]
     M = P[:, :x_dim, x_dim:]
@@ -116,21 +120,21 @@ def compute_kkt_residual(
     Gu = Gu.at[-1].set(0.0)
     η_inv = 1.0 / η
     r_x = r_x.at[-1, x_dim:].set(0.0)
-    bmm = jax.vmap(np.matmul)
+    bmm = jax.vmap(jnp.matmul)
     DxdX_plus_DudU = bmm(Dx, dX[:-1]) + bmm(Du, dU[:-1])
-    DxdX_plus_DudU = np.concatenate(
-        [np.zeros_like(DxdX_plus_DudU[0])[None, ...], DxdX_plus_DudU]
+    DxdX_plus_DudU = jnp.concatenate(
+        [jnp.zeros_like(DxdX_plus_DudU[0])[None, ...], DxdX_plus_DudU]
     )
     Dx_T_dY_dyn = bmm(Dx.mT, dY_dyn[1:])
-    Dx_T_dY_dyn = np.concatenate(
-        [Dx_T_dY_dyn, np.zeros_like(Dx_T_dY_dyn[0])[None, ...]]
+    Dx_T_dY_dyn = jnp.concatenate(
+        [Dx_T_dY_dyn, jnp.zeros_like(Dx_T_dY_dyn[0])[None, ...]]
     )
     Du_T_dY_dyn = bmm(Du.mT, dY_dyn[1:])
-    Du_T_dY_dyn = np.concatenate(
-        [Du_T_dY_dyn, np.zeros_like(Du_T_dY_dyn[0])[None, ...]]
+    Du_T_dY_dyn = jnp.concatenate(
+        [Du_T_dY_dyn, jnp.zeros_like(Du_T_dY_dyn[0])[None, ...]]
     )
 
-    return np.concatenate(
+    return jnp.concatenate(
         [
             (
                 bmm(Q, dX)
@@ -162,21 +166,21 @@ def compute_kkt_residual(
     static_argnames=("use_parallel_lqr",),
 )
 def _solve_kkt_3x3(
-    P: np.ndarray,
-    D: np.ndarray,
-    E: np.ndarray,
-    G: np.ndarray,
-    w: np.ndarray,
-    r_x: np.ndarray,
-    r_y_dyn: np.ndarray,
-    r_y_eq: np.ndarray,
-    r_z: np.ndarray,
+    P: jnp.ndarray,
+    D: jnp.ndarray,
+    E: jnp.ndarray,
+    G: jnp.ndarray,
+    w: jnp.ndarray,
+    r_x: jnp.ndarray,
+    r_y_dyn: jnp.ndarray,
+    r_y_eq: jnp.ndarray,
+    r_z: jnp.ndarray,
     η: float,
     use_parallel_lqr: bool,
 ):
     x_dim = D.shape[1]
     reg_w_inv = 1.0 / (w + 1.0 / η)
-    bmm = jax.vmap(np.matmul)
+    bmm = jax.vmap(jnp.matmul)
     dX, dU, dY_dyn = _solve_kkt_2x2(
         P=(P + η * bmm(E.mT, E) + bmm(G.mT, reg_w_inv[..., None] * G)),
         D=D,
@@ -199,13 +203,13 @@ def _solve_kkt_3x3(
     static_argnames=("use_parallel_lqr",),
 )
 def _solve_kkt_2x2(
-    P: np.ndarray,
-    D: np.ndarray,
-    r_x: np.ndarray,
-    r_y: np.ndarray,
+    P: jnp.ndarray,
+    D: jnp.ndarray,
+    r_x: jnp.ndarray,
+    r_y: jnp.ndarray,
     η: float,
     use_parallel_lqr: bool,
-):
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     solve_fn = solve_parallel if use_parallel_lqr else solve
     N = P.shape[0] - 1
     x_dim = D.shape[1]
@@ -218,7 +222,7 @@ def _solve_kkt_2x2(
         q=r_x[:, :x_dim],
         r=r_x[:-1, x_dim:],
         c=r_y,
-        Δ=np.full(shape=(N + 1,), fill_value=(1.0 / η)),
+        Δ=jnp.full(shape=(N + 1,), fill_value=(1.0 / η)),
     )
-    dU = np.concatenate([dU, np.zeros_like(dU[0])[None, ...]])
+    dU = jnp.concatenate([dU, jnp.zeros_like(dU[0])[None, ...]])
     return dX, dU, dY_dyn

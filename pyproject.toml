@@ -3,10 +3,9 @@ name = "primal-dual-lipa"
 version = "0.1"
 requires-python = ">= 3.12"
 dependencies = [
-  "absl-py",
   "jax[cpu]; platform_system != \"Linux\"",
   "jax[cuda12]; platform_system == \"Linux\"",
-  "regularized_lqr_jax @ git+https://github.com/joaospinto/regularized_lqr_jax@2ed9afce858843b738e110849f8bb607619bec0d",
+  "regularized_lqr_jax @ git+https://github.com/joaospinto/regularized_lqr_jax@7de16e7d66f6e18c6d884606c9ba33e05fccf9b1",
 ]
 authors = [
   {name = "Joao Sousa-Pinto", email = "joaospinto@gmail.com"},
@@ -14,8 +13,16 @@ authors = [
 description = "Implements https://arxiv.org/abs/2509.16370"
 license = "MIT"
 
-[tool.black]
-line-length = 80
+[project.optional-dependencies]
+lint = ["ruff"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["ARG005", "D203", "D213", "COM812", "N803", "N806", "PLC2401", "PLR0913", "FBT001", "FBT002"]
 
 [build-system]
 requires = ["hatchling"]

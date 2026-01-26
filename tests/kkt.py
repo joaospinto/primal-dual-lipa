@@ -4,7 +4,6 @@ import jax
 from jax import numpy as jnp
 
 from regularized_lqr_jax.helpers import symmetrize, regularize
-from regularized_lqr_jax.solver import solve, solve_parallel
 
 from primal_dual_lipa.kkt_helpers import solve_kkt, compute_kkt_residual
 
