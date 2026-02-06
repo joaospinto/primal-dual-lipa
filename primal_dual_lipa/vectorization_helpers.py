@@ -2,7 +2,6 @@
 import jax
 
 
-@jax.jit
 def vectorize(fun, argnums=3):
     """Returns a jitted and vectorized version of the input function.
 
@@ -27,7 +26,6 @@ def vectorize(fun, argnums=3):
     return vfun
 
 
-@jax.jit
 def linearize(fun, argnums=3):
     """Vectorized gradient or jacobian operator.
 
@@ -66,7 +64,6 @@ def linearize(fun, argnums=3):
     return vectorize(linearizer, argnums)
 
 
-@jax.jit
 def quadratize(fun, argnums=3):
     """Vectorized Hessian operator for a scalar function.
 

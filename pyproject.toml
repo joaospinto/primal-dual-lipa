@@ -22,7 +22,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["ARG005", "D203", "D213", "COM812", "N803", "N806", "PLC2401", "PLR0913", "FBT001", "FBT002"]
+ignore = ["ARG005", "D203", "D213", "COM812", "N803", "N806", "PLC2401", "PLR0913", "FBT001", "FBT002", "RUF001"]
 
 [build-system]
 requires = ["hatchling"]

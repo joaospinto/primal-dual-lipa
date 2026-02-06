@@ -6,9 +6,9 @@ import jax
 from jax import numpy as jnp
 
 from primal_dual_lipa.kkt_builder import kkt_builder
-from primal_dual_lipa.kkt_helpers import solve_kkt
-from primal_dual_lipa.lagrangian_helpers import directional_augmented_lagrangian
-from primal_dual_lipa.types import Function, SolverSettings
+from primal_dual_lipa.kkt_helpers import compute_kkt_residual, solve_kkt
+from primal_dual_lipa.lagrangian_helpers import directional_augmented_lagrangian, pad
+from primal_dual_lipa.types import CostFunction, Function, SolverSettings
 
 
 @partial(
@@ -18,7 +18,6 @@ from primal_dual_lipa.types import Function, SolverSettings
         "dynamics",
         "equalities",
         "inequalities",
-        "use_parallel_lqr",
     ],
 )
 def solve(
@@ -29,20 +28,20 @@ def solve(
     Y_eq_in: jnp.ndarray,
     Z_in: jnp.ndarray,
     x0: jnp.ndarray,
-    cost: Function,
+    cost: CostFunction,
     dynamics: Function,
     settings: SolverSettings,
-    equalities: Function = lambda x, u, t: jnp.empty(1),
-    inequalities: Function = lambda x, u, t: jnp.empty(1),
+    equalities: Function = lambda x, u, t: jnp.empty(0),
+    inequalities: Function = lambda x, u, t: jnp.empty(0),
 ) -> tuple[
-    jnp.ndarray,
-    jnp.ndarray,
-    jnp.ndarray,
-    jnp.ndarray,
-    jnp.ndarray,
-    jnp.ndarray,
-    jnp.int32,
-    jnp.bool,
+    jnp.ndarray,  # X
+    jnp.ndarray,  # U
+    jnp.ndarray,  # S
+    jnp.ndarray,  # Y_dyn
+    jnp.ndarray,  # Y_eq
+    jnp.ndarray,  # Z
+    jnp.int32,  # iterations
+    jnp.bool,  # no_errors
 ]:
     """Implement the Primal-Dual LIPA algorithm for discrete-time optimal control.
 
@@ -91,25 +90,47 @@ def solve(
         µ=settings.µ0,
     )
 
+    if settings.print_logs:
+        jax.debug.print(
+            "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(  # noqa: E501
+                "iteration",
+                "α",
+                "cost",
+                "|c|",
+                "|g+s|",
+                "merit",
+                "dmerit/dα",
+                "|dx|+|du|",
+                "|ds|",
+                "|dy|",
+                "|dz|",
+                "η",
+                "µ",
+                "linsys_res",
+            )
+        )
+
     def main_loop_body(
-        X: jnp.ndarray,
-        U: jnp.ndarray,
-        S: jnp.ndarray,
-        Y_dyn: jnp.ndarray,
-        Y_eq: jnp.ndarray,
-        Z: jnp.ndarray,
-        η: jnp.double,
-        µ: jnp.double,
-        P: jnp.ndarray,
-        D: jnp.ndarray,
-        E: jnp.ndarray,
-        G: jnp.ndarray,
-        r_x: jnp.ndarray,
-        r_s: jnp.ndarray,
-        r_y_dyn: jnp.ndarray,
-        r_y_eq: jnp.ndarray,
-        r_z: jnp.ndarray,
-        iteration: jnp.int32,
+        inputs: tuple[
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.int32,
+        ],
     ) -> tuple[
         jnp.ndarray,
         jnp.ndarray,
@@ -130,6 +151,26 @@ def solve(
         jnp.ndarray,
         jnp.int32,
     ]:
+        (
+            X,
+            U,
+            S,
+            Y_dyn,
+            Y_eq,
+            Z,
+            η,
+            µ,
+            P,
+            D,
+            E,
+            G,
+            r_x,
+            r_s,
+            r_y_dyn,
+            r_y_eq,
+            r_z,
+            iteration,
+        ) = inputs
         dX, dU, dS, dY_dyn, dY_eq, dZ = solve_kkt(
             P=P,
             D=D,
@@ -143,8 +184,10 @@ def solve(
             r_y_eq=r_y_eq,
             r_z=r_z,
             η=η,
-            use_parallel_lqr=use_parallel_lqr,
+            use_parallel_lqr=settings.use_parallel_lqr,
         )
+
+        dU = dU[:-1]
 
         dal = directional_augmented_lagrangian(
             cost=cost,
@@ -163,6 +206,7 @@ def solve(
             Y_eq=Y_eq,
             Z=Z,
             dX=dX,
+            dU=dU,
             dS=dS,
         )
 
@@ -187,6 +231,57 @@ def solve(
             1.0,
         )
 
+        if settings.print_logs:
+            residual = compute_kkt_residual(
+                P=P,
+                D=D,
+                E=E,
+                G=G,
+                s=S,
+                z=Z,
+                r_x=r_x,
+                r_s=r_s,
+                r_y_dyn=r_y_dyn,
+                r_y_eq=r_y_eq,
+                r_z=r_z,
+                dX=dX,
+                dU=pad(dU),
+                dS=dS,
+                dY_dyn=dY_dyn,
+                dY_eq=dY_eq,
+                dZ=dZ,
+                η=η,
+            )
+
+            U_pad = pad(U)
+            T_range = jnp.arange(T)
+            Tp1_range = jnp.arange(T + 1)
+
+            c_dyn0 = x0 - X[0]
+            c_dyn = jax.vmap(dynamics)(X[:-1], U, T_range) - X[1:]
+            c_eq = jax.vmap(equalities)(X, U_pad, Tp1_range)
+            c = jnp.concatenate([c_dyn0, c_dyn.flatten(), c_eq.flatten()])
+
+            g = (jax.vmap(inequalities)(X, U_pad, Tp1_range) + S).flatten()
+
+            jax.debug.print(
+                "{:^+10} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g}",  # noqa: E501
+                iteration,
+                α,
+                jax.vmap(cost)(X, U_pad, Tp1_range).sum(),
+                jnp.linalg.norm(c),
+                jnp.linalg.norm(g),
+                baseline_merit,
+                merit_grad,
+                jnp.linalg.norm(dX) + jnp.linalg.norm(dU),
+                jnp.linalg.norm(dS),
+                jnp.linalg.norm(dY_dyn) + jnp.linalg.norm(dY_eq),
+                jnp.linalg.norm(dZ),
+                η,
+                µ,
+                jnp.linalg.norm(residual),
+            )
+
         X += α * dX
         U += α * dU
         S = jnp.maximum(S + α * dS, (1.0 - settings.τ) * S)
@@ -209,7 +304,7 @@ def solve(
             µ=µ,
         )
 
-        η *= settings.η_update_factor
+        η = jnp.minimum(η * settings.η_update_factor, settings.η_max)
         µ = jnp.maximum(µ * settings.µ_update_factor, settings.µ_min)
 
         iteration += 1
@@ -236,25 +331,47 @@ def solve(
         )
 
     def main_loop_continuation_criteria(
-        _unused_X: jnp.ndarray,
-        _unused_U: jnp.ndarray,
-        _unused_S: jnp.ndarray,
-        _unused_Y_dyn: jnp.ndarray,
-        _unused_Y_eq: jnp.ndarray,
-        _unused_Z: jnp.ndarray,
-        _unused_η: jnp.double,  # noqa: ARG001
-        _unused_µ: jnp.double,  # noqa: ARG001
-        _unused_P: jnp.ndarray,
-        _unused_D: jnp.ndarray,
-        _unused_E: jnp.ndarray,
-        _unused_G: jnp.ndarray,
-        r_x: jnp.ndarray,
-        r_s: jnp.ndarray,
-        r_y_dyn: jnp.ndarray,
-        r_y_eq: jnp.ndarray,
-        r_z: jnp.ndarray,
-        iteration: jnp.int32,
+        inputs: tuple[
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.int32,
+        ],
     ) -> jnp.bool:
+        (
+            _unused_X,
+            _unused_U,
+            _unused_S,
+            _unused_Y_dyn,
+            _unused_Y_eq,
+            _unused_Z,
+            _unused_η,
+            _unused_µ,
+            _unused_P,
+            _unused_D,
+            _unused_E,
+            _unused_G,
+            r_x,
+            r_s,
+            r_y_dyn,
+            r_y_eq,
+            r_z,
+            iteration,
+        ) = inputs
         residual = jnp.concatenate(
             [
                 r_x.flatten(),

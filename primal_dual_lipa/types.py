@@ -1,23 +1,18 @@
 """Defines some types."""
 
 from collections.abc import Callable
-from dataclasses import dataclass
-from functools import partial
+from dataclasses import dataclass, field
 
 import jax
 from jax import numpy as jnp
 
 
 @jax.tree_util.register_dataclass
-@partial(
-    jax.tree_util.register_dataclass,
-    meta_fields=["use_parallel_lqr"],
-)
 @dataclass
 class SolverSettings:
     """Encapsulate a few solver settings."""
 
-    max_iterations: jnp.int32 = 100
+    max_iterations: jnp.int32 = 500
     residual_sq_threshold: jnp.double = 1e-16
     α_min: jnp.double = 3e-6
     α_update_factor: jnp.double = 0.5
@@ -29,7 +24,9 @@ class SolverSettings:
     µ_min: jnp.double = 1e-16
     τ: jnp.double = 0.995
     armijo_factor: jnp.double = 1e-4
-    use_parallel_lqr: jnp.bool = False
+    use_parallel_lqr: jnp.bool = field(default=False, metadata={"static": True})
+    print_logs: jnp.bool = field(default=False, metadata={"static": True})
 
 
 Function = Callable[[jnp.ndarray, jnp.ndarray, jnp.int32], jnp.ndarray]
+CostFunction = Callable[[jnp.ndarray, jnp.ndarray, jnp.int32], jnp.double]

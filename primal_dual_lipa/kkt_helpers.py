@@ -62,7 +62,7 @@ def solve_kkt(
             [                                            G_x_{N-1}  G_u_{N-1}        ]
             [                                                                  G_x_N ]
         r_y = stack_rows(r_y_dyn, r_y_eq).
-    """
+    """  # noqa: E501
     w = s / z
     dX, dU, dY_dyn, dY_eq, dZ = _solve_kkt_3x3(
         P=P,
@@ -161,10 +161,6 @@ def compute_kkt_residual(
     )
 
 
-@partial(
-    jax.jit,
-    static_argnames=("use_parallel_lqr",),
-)
 def _solve_kkt_3x3(
     P: jnp.ndarray,
     D: jnp.ndarray,
@@ -177,7 +173,7 @@ def _solve_kkt_3x3(
     r_z: jnp.ndarray,
     η: float,
     use_parallel_lqr: bool,
-):
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     x_dim = D.shape[1]
     reg_w_inv = 1.0 / (w + 1.0 / η)
     bmm = jax.vmap(jnp.matmul)
@@ -198,10 +194,6 @@ def _solve_kkt_3x3(
     return dX, dU, dY_dyn, dY_eq, dZ
 
 
-@partial(
-    jax.jit,
-    static_argnames=("use_parallel_lqr",),
-)
 def _solve_kkt_2x2(
     P: jnp.ndarray,
     D: jnp.ndarray,

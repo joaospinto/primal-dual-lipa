@@ -1,17 +1,21 @@
+"""Test the KKT helpers."""
+
 import unittest
 
 import jax
 from jax import numpy as jnp
+from regularized_lqr_jax.helpers import regularize, symmetrize
 
-from regularized_lqr_jax.helpers import symmetrize, regularize
+from primal_dual_lipa.kkt_helpers import compute_kkt_residual, solve_kkt
 
-from primal_dual_lipa.kkt_helpers import solve_kkt, compute_kkt_residual
-
-jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_enable_x64", True)  # noqa: FBT003
 
 
 class TestKKTSolves(unittest.TestCase):
-    def setUp(self):
+    """Test the KKT helpers."""
+
+    def setUp(self) -> None:
+        """Set up the unit test."""
         n = 4
         m = 2
         T = 30
@@ -78,7 +82,8 @@ class TestKKTSolves(unittest.TestCase):
         key, subkey = jax.random.split(key)
         self.η = jnp.abs(jax.random.uniform(subkey, (1,)))[0]
 
-    def test(self):
+    def test(self) -> None:
+        """Run the test."""
         for use_parallel_lqr in [False, True]:
             with self.subTest(use_parallel_lqr=use_parallel_lqr):
                 dX, dU, dS, dY_dyn, dY_eq, dZ = solve_kkt(
@@ -119,9 +124,9 @@ class TestKKTSolves(unittest.TestCase):
                 )
 
                 if use_parallel_lqr:
-                    self.assertLess(jnp.linalg.norm(residual), 1e-3)
+                    self.assertLess(jnp.linalg.norm(residual), 1e-3)  # noqa: PT009
                 else:
-                    self.assertLess(jnp.linalg.norm(residual), 1e-9)
+                    self.assertLess(jnp.linalg.norm(residual), 1e-9)  # noqa: PT009
 
 
 if __name__ == "__main__":
