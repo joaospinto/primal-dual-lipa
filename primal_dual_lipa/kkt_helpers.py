@@ -98,7 +98,9 @@ def compute_kkt_residual(
     dY_eq: jnp.ndarray,
     dZ: jnp.ndarray,
     η: float,
-) -> jnp.ndarray:
+) -> tuple[
+    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray
+]:
     """Compute the residual of the Newton-KKT system from solve_kkt."""
     N, x_dim = D.shape[:2]
     Q = P[:, :x_dim, :x_dim]
@@ -131,31 +133,34 @@ def compute_kkt_residual(
         [Du_T_dY_dyn, jnp.zeros_like(Du_T_dY_dyn[0])[None, ...]]
     )
 
-    return jnp.concatenate(
-        [
-            (
-                bmm(Q, dX)
-                + bmm(M, dU)
-                + Dx_T_dY_dyn
-                - dY_dyn
-                + bmm(Ex.mT, dY_eq)
-                + bmm(Gx.mT, dZ)
-                + r_x[:, :x_dim]
-            ).flatten(),
-            (
-                bmm(M.mT, dX)
-                + bmm(R, dU)
-                + Du_T_dY_dyn
-                + bmm(Eu.mT, dY_eq)
-                + bmm(Gu.mT, dZ)
-                + r_x[:, x_dim:]
-            ).flatten(),
-            (w_inv * dS + dZ + r_s).flatten(),
-            (DxdX_plus_DudU - dX - η_inv * dY_dyn + r_y_dyn).flatten(),
-            (bmm(Ex, dX) + bmm(Eu, dU) - η_inv * dY_eq + r_y_eq).flatten(),
-            (bmm(Gx, dX) + bmm(Gu, dU) + dS - η_inv * dZ + r_z).flatten(),
-        ]
+    res_X = (
+        bmm(Q, dX)
+        + bmm(M, dU)
+        + Dx_T_dY_dyn
+        - dY_dyn
+        + bmm(Ex.mT, dY_eq)
+        + bmm(Gx.mT, dZ)
+        + r_x[:, :x_dim]
     )
+
+    res_U = (
+        bmm(M.mT, dX)
+        + bmm(R, dU)
+        + Du_T_dY_dyn
+        + bmm(Eu.mT, dY_eq)
+        + bmm(Gu.mT, dZ)
+        + r_x[:, x_dim:]
+    )
+
+    res_S = w_inv * dS + dZ + r_s
+
+    res_Y_dyn = DxdX_plus_DudU - dX - η_inv * dY_dyn + r_y_dyn
+
+    res_Y_eq = bmm(Ex, dX) + bmm(Eu, dU) - η_inv * dY_eq + r_y_eq
+
+    res_Z = bmm(Gx, dX) + bmm(Gu, dU) + dS - η_inv * dZ + r_z
+
+    return res_X, res_U, res_S, res_Y_dyn, res_Y_eq, res_Z
 
 
 def _solve_kkt_3x3(

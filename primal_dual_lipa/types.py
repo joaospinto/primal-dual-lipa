@@ -24,6 +24,7 @@ class SolverSettings:
     µ_min: jnp.double = 1e-16
     τ: jnp.double = 0.995
     armijo_factor: jnp.double = 1e-4
+    num_iterative_refinement_steps: jnp.int32 = 0
     use_parallel_lqr: jnp.bool = field(default=False, metadata={"static": True})
     print_logs: jnp.bool = field(default=False, metadata={"static": True})
 

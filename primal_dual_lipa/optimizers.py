@@ -187,6 +187,92 @@ def solve(
             use_parallel_lqr=settings.use_parallel_lqr,
         )
 
+        def iterative_refinement_loop_continuation_criteria(
+            x: tuple[
+                jnp.ndarray,
+                jnp.ndarray,
+                jnp.ndarray,
+                jnp.ndarray,
+                jnp.ndarray,
+                jnp.ndarray,
+                jnp.int32,
+            ],
+        ) -> jnp.bool:
+            return x[-1] < settings.num_iterative_refinement_steps
+
+        def iterative_refinement_loop_body(
+            x: tuple[
+                jnp.ndarray,
+                jnp.ndarray,
+                jnp.ndarray,
+                jnp.ndarray,
+                jnp.ndarray,
+                jnp.ndarray,
+                jnp.int32,
+            ],
+        ) -> tuple[
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.int32,
+        ]:
+            dX, dU, dS, dY_dyn, dY_eq, dZ, it = x
+            res_X, res_U, res_S, res_Y_dyn, res_Y_eq, res_Z = compute_kkt_residual(
+                P=P,
+                D=D,
+                E=E,
+                G=G,
+                w_inv=w_inv,
+                r_x=r_x,
+                r_s=r_s,
+                r_y_dyn=r_y_dyn,
+                r_y_eq=r_y_eq,
+                r_z=r_z,
+                dX=dX,
+                dU=dU,
+                dS=dS,
+                dY_dyn=dY_dyn,
+                dY_eq=dY_eq,
+                dZ=dZ,
+                η=η,
+            )
+
+            res_XU = jnp.concatenate([res_X, res_U], axis=-1)
+
+            ddX, ddU, ddS, ddY_dyn, ddY_eq, ddZ = solve_kkt(
+                P=P,
+                D=D,
+                E=E,
+                G=G,
+                w_inv=w_inv,
+                r_x=res_XU,
+                r_s=res_S,
+                r_y_dyn=res_Y_dyn,
+                r_y_eq=res_Y_eq,
+                r_z=res_Z,
+                η=η,
+                use_parallel_lqr=settings.use_parallel_lqr,
+            )
+
+            return (
+                dX + ddX,
+                dU + ddU,
+                dS + ddS,
+                dY_dyn + ddY_dyn,
+                dY_eq + ddY_eq,
+                dZ + ddZ,
+                it + 1,
+            )
+
+        dX, dU, dS, dY_dyn, dY_eq, dZ, _ = jax.lax.while_loop(
+            iterative_refinement_loop_continuation_criteria,
+            iterative_refinement_loop_body,
+            (dX, dU, dS, dY_dyn, dY_eq, dZ, 0),
+        )
+
         dU = dU[:-1]
 
         dal = directional_augmented_lagrangian(
@@ -232,7 +318,7 @@ def solve(
         )
 
         if settings.print_logs:
-            residual = compute_kkt_residual(
+            res_X, res_U, res_S, res_Y_dyn, res_Y_eq, res_Z = compute_kkt_residual(
                 P=P,
                 D=D,
                 E=E,
@@ -250,6 +336,16 @@ def solve(
                 dY_eq=dY_eq,
                 dZ=dZ,
                 η=η,
+            )
+            residual = jnp.concatenate(
+                [
+                    res_X.flatten(),
+                    res_U.flatten(),
+                    res_S.flatten(),
+                    res_Y_dyn.flatten(),
+                    res_Y_eq.flatten(),
+                    res_Z.flatten(),
+                ]
             )
 
             U_pad = pad(U)

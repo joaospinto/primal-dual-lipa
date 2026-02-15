@@ -103,7 +103,7 @@ class TestKKTSolves(unittest.TestCase):
                     use_parallel_lqr=use_parallel_lqr,
                 )
 
-                residual = compute_kkt_residual(
+                res_X, res_U, res_S, res_Y_dyn, res_Y_eq, res_Z = compute_kkt_residual(
                     P=self.P,
                     D=self.D,
                     E=self.E,
@@ -121,6 +121,16 @@ class TestKKTSolves(unittest.TestCase):
                     dY_eq=dY_eq,
                     dZ=dZ,
                     η=self.η,
+                )
+                residual = jnp.concatenate(
+                    [
+                        res_X.flatten(),
+                        res_U.flatten(),
+                        res_S.flatten(),
+                        res_Y_dyn.flatten(),
+                        res_Y_eq.flatten(),
+                        res_Z.flatten(),
+                    ]
                 )
 
                 if use_parallel_lqr:
