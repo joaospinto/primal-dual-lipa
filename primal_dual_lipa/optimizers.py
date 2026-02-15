@@ -171,13 +171,13 @@ def solve(
             r_z,
             iteration,
         ) = inputs
+        w_inv = jnp.maximum(Z / S, 1e-8)
         dX, dU, dS, dY_dyn, dY_eq, dZ = solve_kkt(
             P=P,
             D=D,
             E=E,
             G=G,
-            s=S,
-            z=Z,
+            w_inv=w_inv,
             r_x=r_x,
             r_s=r_s,
             r_y_dyn=r_y_dyn,
@@ -237,8 +237,7 @@ def solve(
                 D=D,
                 E=E,
                 G=G,
-                s=S,
-                z=Z,
+                w_inv=w_inv,
                 r_x=r_x,
                 r_s=r_s,
                 r_y_dyn=r_y_dyn,

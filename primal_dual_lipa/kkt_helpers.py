@@ -19,8 +19,7 @@ def solve_kkt(
     D: jnp.ndarray,
     E: jnp.ndarray,
     G: jnp.ndarray,
-    s: jnp.ndarray,
-    z: jnp.ndarray,
+    w_inv: jnp.ndarray,
     r_x: jnp.ndarray,
     r_s: jnp.ndarray,
     r_y_dyn: jnp.ndarray,
@@ -34,14 +33,13 @@ def solve_kkt(
     """Solve the Newton-KKT linear systems.
 
     The block-4x4 Newton-KKT linear system is of the form
-        [ P       0      C^T      G^T  ] [∆x] = - [ r_x ],
-        [ 0   S^{-1} Z    0        I   ] [∆s]     [ r_s ]
-        [ C       0    -(1/η)I     0   ] [∆y]     [ r_y ]
-        [ G       I       0    -(1/η)I ] [∆z]     [ r_z ]
+        [ P     0      C^T      G^T  ] [∆x] = - [ r_x ],
+        [ 0   W^{-1}    0        I   ] [∆s]     [ r_s ]
+        [ C     0    -(1/η)I     0   ] [∆y]     [ r_y ]
+        [ G     I       0    -(1/η)I ] [∆z]     [ r_z ]
     where
         P = diag(P_0, ..., P_N),
-        S = diag(s),
-        Z = diag(z),
+        W^{-1} = diag(w_inv),
         C = stack_rows(Jacobian(dynamics), E),
         Jacobian(dynamics) = [  -I                                                                 ],
                              [ D_x_0  D_u_0  -I                                                    ]
@@ -63,7 +61,7 @@ def solve_kkt(
             [                                                                  G_x_N ]
         r_y = stack_rows(r_y_dyn, r_y_eq).
     """  # noqa: E501
-    w = s / z
+    w = 1.0 / w_inv
     dX, dU, dY_dyn, dY_eq, dZ = _solve_kkt_3x3(
         P=P,
         D=D,
@@ -87,8 +85,7 @@ def compute_kkt_residual(
     D: jnp.ndarray,
     E: jnp.ndarray,
     G: jnp.ndarray,
-    s: jnp.ndarray,
-    z: jnp.ndarray,
+    w_inv: jnp.ndarray,
     r_x: jnp.ndarray,
     r_s: jnp.ndarray,
     r_y_dyn: jnp.ndarray,
@@ -153,7 +150,7 @@ def compute_kkt_residual(
                 + bmm(Gu.mT, dZ)
                 + r_x[:, x_dim:]
             ).flatten(),
-            (z * dS / s + dZ + r_s).flatten(),
+            (w_inv * dS + dZ + r_s).flatten(),
             (DxdX_plus_DudU - dX - η_inv * dY_dyn + r_y_dyn).flatten(),
             (bmm(Ex, dX) + bmm(Eu, dU) - η_inv * dY_eq + r_y_eq).flatten(),
             (bmm(Gx, dX) + bmm(Gu, dU) + dS - η_inv * dZ + r_z).flatten(),

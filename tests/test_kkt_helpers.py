@@ -58,10 +58,12 @@ class TestKKTSolves(unittest.TestCase):
         self.P = jax.vmap(lambda q, m, r: jnp.block([[q, m], [m.T, r]]))(Q, M, R)
 
         key, subkey = jax.random.split(key)
-        self.s = jnp.abs(jax.random.uniform(subkey, (T + 1, g_dim)))
+        s = jnp.abs(jax.random.uniform(subkey, (T + 1, g_dim)))
 
         key, subkey = jax.random.split(key)
-        self.z = jnp.abs(jax.random.uniform(subkey, (T + 1, g_dim)))
+        z = jnp.abs(jax.random.uniform(subkey, (T + 1, g_dim)))
+
+        self.w_inv = z / s
 
         key, subkey = jax.random.split(key)
         self.r_x = jax.random.uniform(subkey, (T + 1, n + m))
@@ -91,8 +93,7 @@ class TestKKTSolves(unittest.TestCase):
                     D=self.D,
                     E=self.E,
                     G=self.G,
-                    s=self.s,
-                    z=self.z,
+                    w_inv=self.w_inv,
                     r_x=self.r_x,
                     r_s=self.r_s,
                     r_y_dyn=self.r_y_dyn,
@@ -107,8 +108,7 @@ class TestKKTSolves(unittest.TestCase):
                     D=self.D,
                     E=self.E,
                     G=self.G,
-                    s=self.s,
-                    z=self.z,
+                    w_inv=self.w_inv,
                     r_x=self.r_x,
                     r_s=self.r_s,
                     r_y_dyn=self.r_y_dyn,
