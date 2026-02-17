@@ -27,6 +27,7 @@ class SolverSettings:
     num_iterative_refinement_steps: jnp.int32 = 0
     use_parallel_lqr: jnp.bool = field(default=False, metadata={"static": True})
     print_logs: jnp.bool = field(default=False, metadata={"static": True})
+    print_ls_logs: jnp.bool = field(default=False, metadata={"static": True})
 
 
 Function = Callable[[jnp.ndarray, jnp.ndarray, jnp.int32], jnp.ndarray]

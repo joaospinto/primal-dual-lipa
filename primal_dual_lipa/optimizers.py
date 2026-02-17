@@ -90,7 +90,7 @@ def solve(
         µ=settings.µ0,
     )
 
-    if settings.print_logs:
+    if not settings.print_ls_logs:
         jax.debug.print(
             "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(  # noqa: E501
                 "iteration",
@@ -107,7 +107,8 @@ def solve(
                 "η",
                 "µ",
                 "linsys_res",
-            )
+            ),
+            ordered=True,
         )
 
     def main_loop_body(
@@ -300,6 +301,20 @@ def solve(
 
         merit_grad = jax.grad(dal)(0.0)
 
+        if settings.print_ls_logs:
+            jax.debug.print(
+                "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(
+                    "",
+                    "α",
+                    "cost",
+                    "|c|",
+                    "|g+s|",
+                    "dmerit",
+                    "dmerit/α",
+                ),
+                ordered=True,
+            )
+
         def line_search_loop_body(α: jnp.double) -> jnp.double:
             return α * settings.α_update_factor
 
@@ -309,6 +324,34 @@ def solve(
                 candidate_merit - baseline_merit
                 > α * settings.armijo_factor * merit_grad
             )
+            if settings.print_ls_logs:
+                cX = X + α * dX
+                cU = U + α * dU
+                cU_pad = pad(cU)
+                cS = jnp.maximum(S + α * dS, (1.0 - settings.τ) * S)
+
+                T_range = jnp.arange(T)
+                Tp1_range = jnp.arange(T + 1)
+
+                c_dyn0 = x0 - cX[0]
+                c_dyn = jax.vmap(dynamics)(cX[:-1], cU, T_range) - cX[1:]
+                c_eq = jax.vmap(equalities)(cX, cU_pad, Tp1_range)
+                c = jnp.concatenate([c_dyn0, c_dyn.flatten(), c_eq.flatten()])
+
+                g = jax.vmap(inequalities)(cX, cU_pad, Tp1_range)
+                gps = (g + cS).flatten()
+                dmerit = candidate_merit - baseline_merit
+                jax.debug.print(
+                    "{:^10} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g}",  # noqa: E501
+                    "",
+                    α,
+                    jax.vmap(cost)(cX, cU_pad, Tp1_range).sum(),
+                    jnp.linalg.norm(c),
+                    jnp.linalg.norm(gps),
+                    dmerit,
+                    dmerit / α,
+                    ordered=True,
+                )
             return jnp.logical_and(α > settings.α_min, armijo_condition_not_met)
 
         α = jax.lax.while_loop(
@@ -359,6 +402,27 @@ def solve(
 
             g = (jax.vmap(inequalities)(X, U_pad, Tp1_range) + S).flatten()
 
+            if settings.print_ls_logs:
+                jax.debug.print(
+                    "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(  # noqa: E501
+                        "iteration",
+                        "α",
+                        "cost",
+                        "|c|",
+                        "|g+s|",
+                        "merit",
+                        "dmerit/dα",
+                        "|dx|+|du|",
+                        "|ds|",
+                        "|dy|",
+                        "|dz|",
+                        "η",
+                        "µ",
+                        "linsys_res",
+                    ),
+                    ordered=True,
+                )
+
             jax.debug.print(
                 "{:^+10} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g}",  # noqa: E501
                 iteration,
@@ -375,6 +439,7 @@ def solve(
                 η,
                 µ,
                 jnp.linalg.norm(residual),
+                ordered=True,
             )
 
         X += α * dX
