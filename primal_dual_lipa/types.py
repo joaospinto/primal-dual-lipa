@@ -5,6 +5,16 @@ from dataclasses import dataclass, field
 
 import jax
 from jax import numpy as jnp
+from regularized_lqr_jax.types import (
+    FactorizationInputs as LQRFactorizationInputs,
+)
+from regularized_lqr_jax.types import (
+    ParallelFactorizationOutputs as LQRParallelFactorizationOutputs,
+)
+from regularized_lqr_jax.types import (
+    SequentialFactorizationOutputs as LQRSequentialFactorizationOutputs,
+)
+from regularized_lqr_jax.types import SolveOutputs as LQRSolveOutputs
 
 
 @jax.tree_util.register_dataclass
@@ -17,10 +27,11 @@ class SolverSettings:
     α_min: jnp.double = 3e-6
     α_update_factor: jnp.double = 0.5
     η0: jnp.double = 1e3
-    η_update_factor: jnp.double = 10.0
+    η_update_factor: jnp.double = 2.0
     η_max: jnp.double = 1e12
+    η_improvement_threshold: jnp.double = 0.9
     µ0: jnp.double = 1e-3
-    µ_update_factor: jnp.double = 0.5
+    µ_update_factor: jnp.double = 0.8
     µ_min: jnp.double = 1e-16
     τ: jnp.double = 0.995
     armijo_factor: jnp.double = 1e-4
@@ -32,3 +43,58 @@ class SolverSettings:
 
 Function = Callable[[jnp.ndarray, jnp.ndarray, jnp.int32], jnp.ndarray]
 CostFunction = Callable[[jnp.ndarray, jnp.ndarray, jnp.int32], jnp.double]
+
+
+@jax.tree_util.register_dataclass
+@dataclass
+class Parameters:
+    """Encapsulate µ and η variables."""
+
+    µ: jnp.double
+    η_dyn: jnp.ndarray
+    η_eq: jnp.ndarray
+    η_ineq: jnp.ndarray
+
+
+@jax.tree_util.register_dataclass
+@dataclass
+class KKTFactorizationInputs:
+    """Inputs to the KKT factorization."""
+
+    P: jnp.ndarray
+    D: jnp.ndarray
+    E: jnp.ndarray
+    G: jnp.ndarray
+    w_inv: jnp.ndarray
+    params: Parameters
+
+
+@jax.tree_util.register_dataclass
+@dataclass
+class KKTFactorizationOutputs:
+    """KKT factorization outputs."""
+
+    lqr_inputs: LQRFactorizationInputs
+    lqr_outputs: LQRSequentialFactorizationOutputs | LQRParallelFactorizationOutputs
+
+
+@jax.tree_util.register_dataclass
+@dataclass
+class Variables:
+    """Generic variables container."""
+
+    X: jnp.ndarray
+    U: jnp.ndarray
+    S: jnp.ndarray
+    Y_dyn: jnp.ndarray
+    Y_eq: jnp.ndarray
+    Z: jnp.ndarray
+
+
+@jax.tree_util.register_dataclass
+@dataclass
+class KKTSystem:
+    """Encapsulate the KKT system (LHS and RHS)."""
+
+    lhs: KKTFactorizationInputs
+    rhs: Variables

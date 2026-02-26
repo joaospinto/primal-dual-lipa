@@ -10,7 +10,14 @@ from jax import numpy as jnp
 from regularized_lqr_jax.helpers import regularize
 
 from primal_dual_lipa.lagrangian_helpers import build_lagrangian, pad
-from primal_dual_lipa.types import CostFunction, Function
+from primal_dual_lipa.types import (
+    CostFunction,
+    Function,
+    KKTFactorizationInputs,
+    KKTSystem,
+    Parameters,
+    Variables,
+)
 from primal_dual_lipa.vectorization_helpers import linearize, quadratize, vectorize
 
 
@@ -29,31 +36,16 @@ def kkt_builder(
     equalities: Function,
     inequalities: Function,
     x0: jnp.ndarray,
-    X: jnp.ndarray,
-    U: jnp.ndarray,
-    S: jnp.ndarray,
-    Y_dyn: jnp.ndarray,
-    Y_eq: jnp.ndarray,
-    Z: jnp.ndarray,
-    µ: jnp.double,
-) -> tuple[
-    jnp.ndarray,
-    jnp.ndarray,
-    jnp.ndarray,
-    jnp.ndarray,
-    jnp.ndarray,
-    jnp.ndarray,
-    jnp.ndarray,
-    jnp.ndarray,
-    jnp.ndarray,
-]:
+    vars: Variables,
+    params: Parameters,
+) -> KKTSystem:
     """Build the Newton-KKT system used to compute the line search direction."""
-    T = X.shape[0] - 1
+    T = vars.X.shape[0] - 1
 
     T_range = jnp.arange(T)
     Tp1_range = jnp.arange(T + 1)
 
-    U_pad = pad(U)
+    U_pad = pad(vars.U)
 
     lagrangian = build_lagrangian(
         cost=cost,
@@ -61,12 +53,19 @@ def kkt_builder(
         equalities=equalities,
         inequalities=inequalities,
         x0=x0,
-        µ=µ,
+        µ=params.µ,
     )
 
     quadratizer = quadratize(lagrangian, argnums=8)
     Q, R_pad, M_pad = quadratizer(
-        X, U_pad, Tp1_range, S, pad(Y_dyn[1:]), Y_dyn, Y_eq, Z
+        vars.X,
+        U_pad,
+        Tp1_range,
+        vars.S,
+        pad(vars.Y_dyn[1:]),
+        vars.Y_dyn,
+        vars.Y_eq,
+        vars.Z,
     )
 
     M = M_pad[:-1]
@@ -81,28 +80,53 @@ def kkt_builder(
     P = jax.vmap(lambda q, m, r: jnp.block([[q, m], [m.T, r]]))(Q, M_pad, R_pad)
 
     linearizer = linearize(lagrangian, argnums=8)
-    q, r_pad = linearizer(X, U_pad, Tp1_range, S, pad(Y_dyn[1:]), Y_dyn, Y_eq, Z)
-    r_pad = r_pad.at[-1].set(0.0)
-
-    r_x = jnp.concatenate([q, r_pad], axis=-1)
+    q, r_pad = linearizer(
+        vars.X,
+        U_pad,
+        Tp1_range,
+        vars.S,
+        pad(vars.Y_dyn[1:]),
+        vars.Y_dyn,
+        vars.Y_eq,
+        vars.Z,
+    )
 
     dynamics_linearizer = linearize(dynamics)
-    A, B = dynamics_linearizer(X[:-1], U, T_range)
+    A, B = dynamics_linearizer(vars.X[:-1], vars.U, T_range)
     D = jnp.concatenate([A, B], axis=-1)
 
-    r_s = Z - µ / S
+    r_s = vars.Z - params.µ / vars.S
 
-    r_y_dyn = vectorize(dynamics)(X[:-1], U, T_range) - X[1:]
-    r_y_dyn = jnp.concatenate([(x0 - X[0])[None, ...], r_y_dyn])
+    r_y_dyn = vectorize(dynamics)(vars.X[:-1], vars.U, T_range) - vars.X[1:]
+    r_y_dyn = jnp.concatenate([(x0 - vars.X[0])[None, ...], r_y_dyn])
 
-    r_y_eq = vectorize(equalities)(X, U_pad, Tp1_range)
+    r_y_eq = vectorize(equalities)(vars.X, U_pad, Tp1_range)
 
-    r_z = vectorize(inequalities)(X, U_pad, Tp1_range) + S
+    r_z = vectorize(inequalities)(vars.X, U_pad, Tp1_range) + vars.S
 
-    E_x, E_u = linearize(equalities)(X, U_pad, Tp1_range)
+    E_x, E_u = linearize(equalities)(vars.X, U_pad, Tp1_range)
     E = jnp.concatenate([E_x, E_u], axis=-1)
 
-    G_x, G_u = linearize(inequalities)(X, U_pad, Tp1_range)
+    G_x, G_u = linearize(inequalities)(vars.X, U_pad, Tp1_range)
     G = jnp.concatenate([G_x, G_u], axis=-1)
 
-    return P, D, E, G, r_x, r_s, r_y_dyn, r_y_eq, r_z
+    w_inv = jnp.clip(vars.Z / vars.S, 1e-8, 1e8)
+
+    return KKTSystem(
+        lhs=KKTFactorizationInputs(
+            P=P,
+            D=D,
+            E=E,
+            G=G,
+            w_inv=w_inv,
+            params=params,
+        ),
+        rhs=Variables(
+            X=q,
+            U=r_pad[:-1],
+            S=r_s,
+            Y_dyn=r_y_dyn,
+            Y_eq=r_y_eq,
+            Z=r_z,
+        ),
+    )

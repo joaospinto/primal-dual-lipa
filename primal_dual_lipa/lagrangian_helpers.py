@@ -3,7 +3,7 @@
 import jax
 from jax import numpy as jnp
 
-from primal_dual_lipa.types import CostFunction, Function
+from primal_dual_lipa.types import CostFunction, Function, Parameters, Variables
 
 
 def pad(A: jnp.ndarray) -> jnp.ndarray:
@@ -48,8 +48,7 @@ def build_total_augmented_lagrangian(  # noqa: ANN201
     equalities: Function,
     inequalities: Function,
     x0: jnp.ndarray,
-    µ: jnp.double,
-    η: jnp.double,
+    params: Parameters,
     T: jnp.int32,
 ):
     """Return a function to evaluate the associated Augmented Lagrangian."""
@@ -59,48 +58,43 @@ def build_total_augmented_lagrangian(  # noqa: ANN201
         equalities=equalities,
         inequalities=inequalities,
         x0=x0,
-        µ=µ,
+        µ=params.µ,
     )
 
     T_range = jnp.arange(T)
     Tp1_range = jnp.arange(T + 1)
 
     def augmented_lagrangian(
-        X: jnp.ndarray,
-        U: jnp.ndarray,
-        S: jnp.ndarray,
-        Y_dyn: jnp.ndarray,
-        Y_eq: jnp.ndarray,
-        Z: jnp.ndarray,
+        vars: Variables,
     ) -> jnp.double:
-        U_pad = pad(U)
-        next_Y_dyn = pad(Y_dyn[1:])
+        U_pad = pad(vars.U)
+        next_Y_dyn = pad(vars.Y_dyn[1:])
         c1 = jnp.sum(
             jax.vmap(
                 lambda t: lagrangian(
-                    X=X[t],
+                    X=vars.X[t],
                     U=U_pad[t],
                     t=t,
-                    S=S[t],
+                    S=vars.S[t],
                     next_Y_dyn=next_Y_dyn[t],
-                    Y_dyn=Y_dyn[t],
-                    Y_eq=Y_eq[t],
-                    Z=Z[t],
+                    Y_dyn=vars.Y_dyn[t],
+                    Y_eq=vars.Y_eq[t],
+                    Z=vars.Z[t],
                 )
             )(Tp1_range)
         )
-        c2 = 0.5 * η * jnp.sum(jnp.square(jax.vmap(equalities)(X, U_pad, Tp1_range)))
-        c3 = (
-            0.5
-            * η
-            * jnp.sum(jnp.square(jax.vmap(inequalities)(X, U_pad, Tp1_range) + S))
+        c2 = 0.5 * jnp.sum(
+            params.η_eq * jnp.square(jax.vmap(equalities)(vars.X, U_pad, Tp1_range))
         )
-        c4 = (
-            0.5
-            * η
-            * jnp.sum(jnp.square(jax.vmap(dynamics)(X[:-1], U, T_range) - X[1:]))
+        c3 = 0.5 * jnp.sum(
+            params.η_ineq
+            * jnp.square(jax.vmap(inequalities)(vars.X, U_pad, Tp1_range) + vars.S)
         )
-        c5 = 0.5 * η * jnp.sum(jnp.square(x0 - X[0]))
+        c4 = 0.5 * jnp.sum(
+            params.η_dyn[1:]
+            * jnp.square(jax.vmap(dynamics)(vars.X[:-1], vars.U, T_range) - vars.X[1:])
+        )
+        c5 = 0.5 * jnp.sum(params.η_dyn[0] * jnp.square(x0 - vars.X[0]))
         return c1 + c2 + c3 + c4 + c5
 
     return augmented_lagrangian
@@ -112,19 +106,11 @@ def directional_augmented_lagrangian(  # noqa: ANN201
     equalities: Function,
     inequalities: Function,
     x0: jnp.ndarray,
-    µ: jnp.double,
-    η: jnp.double,
+    params: Parameters,
     τ: jnp.double,
     T: jnp.int32,
-    X: jnp.ndarray,
-    U: jnp.ndarray,
-    S: jnp.ndarray,
-    Y_dyn: jnp.ndarray,
-    Y_eq: jnp.ndarray,
-    Z: jnp.ndarray,
-    dX: jnp.ndarray,
-    dU: jnp.ndarray,
-    dS: jnp.ndarray,
+    vars: Variables,
+    deltas: Variables,
 ):
     """Define the directional Augmented Lagrangian used in the line search."""
     augmented_lagrangian = build_total_augmented_lagrangian(
@@ -133,19 +119,20 @@ def directional_augmented_lagrangian(  # noqa: ANN201
         equalities=equalities,
         inequalities=inequalities,
         x0=x0,
-        µ=µ,
-        η=η,
+        params=params,
         T=T,
     )
 
     def dal(α: jnp.double) -> jnp.double:
         return augmented_lagrangian(
-            X=(X + α * dX),
-            U=(U + α * dU),
-            S=jnp.maximum(S + α * dS, (1.0 - τ) * S),
-            Y_dyn=Y_dyn,
-            Y_eq=Y_eq,
-            Z=Z,
+            Variables(
+                X=(vars.X + α * deltas.X),
+                U=(vars.U + α * deltas.U),
+                S=jnp.maximum(vars.S + α * deltas.S, (1.0 - τ) * vars.S),
+                Y_dyn=vars.Y_dyn,
+                Y_eq=vars.Y_eq,
+                Z=vars.Z,
+            )
         )
 
     return dal

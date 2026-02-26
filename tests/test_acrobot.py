@@ -11,6 +11,7 @@ from jax import numpy as jnp
 from primal_dual_lipa.integrators import euler
 from primal_dual_lipa.lagrangian_helpers import pad
 from primal_dual_lipa.optimizers import SolverSettings, solve
+from primal_dual_lipa.types import Variables
 
 jax.config.update("jax_enable_x64", True)  # noqa: FBT003
 
@@ -106,25 +107,24 @@ class TestAcrobot(unittest.TestCase):
         Y_eq = jnp.zeros([T + 1, c_dim])
         Z = jnp.zeros([T + 1, g_dim])
 
+        vars_in = Variables(X=X, U=U, S=S, Y_dyn=Y_dyn, Y_eq=Y_eq, Z=Z)
+
         x0 = jnp.zeros(n)
 
         settings = SolverSettings(print_logs=True)
 
         print("Acrobot problem")  # noqa: T201
-        X, U, S, Y_dyn, Y_eq, Z, iterations, no_errors = solve(
-            X_in=X,
-            U_in=U,
-            S_in=S,
-            Y_dyn_in=Y_dyn,
-            Y_eq_in=Y_eq,
-            Z_in=Z,
+        vars_out, iterations, no_errors = solve(
+            vars_in=vars_in,
             x0=x0,
             cost=cost,
             dynamics=dynamics,
             settings=settings,
         )
         self.assertTrue(no_errors)  # noqa: PT009
-        self.assertLess(jax.vmap(cost)(X, pad(U), jnp.arange(T + 1)).sum(), 45.0)  # noqa: PT009
+        self.assertLess(
+            jax.vmap(cost)(vars_out.X, pad(vars_out.U), jnp.arange(T + 1)).sum(), 45.0
+        )  # noqa: PT009
 
 
 if __name__ == "__main__":

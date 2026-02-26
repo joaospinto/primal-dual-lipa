@@ -5,7 +5,7 @@ requires-python = ">= 3.12"
 dependencies = [
   "jax[cpu]; platform_system != \"Linux\"",
   "jax[cuda12]; platform_system == \"Linux\"",
-  "regularized_lqr_jax @ git+https://github.com/joaospinto/regularized_lqr_jax@7de16e7d66f6e18c6d884606c9ba33e05fccf9b1",
+  "regularized_lqr_jax @ git+https://github.com/joaospinto/regularized_lqr_jax@9d4240060b0de4726d9b745c3e134994998f4fbb",
 ]
 authors = [
   {name = "Joao Sousa-Pinto", email = "joaospinto@gmail.com"},
@@ -22,7 +22,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["ARG005", "D203", "D213", "COM812", "N803", "N806", "PLC2401", "PLR0913", "FBT001", "FBT002", "RUF001"]
+ignore = ["ARG005", "D203", "D213", "COM812", "N803", "N806", "N815", "PLC2401", "PLR0913", "FBT001", "FBT002", "RUF001"]
 
 [build-system]
 requires = ["hatchling"]

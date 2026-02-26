@@ -6,7 +6,12 @@ import jax
 from jax import numpy as jnp
 from regularized_lqr_jax.helpers import regularize, symmetrize
 
-from primal_dual_lipa.kkt_helpers import compute_kkt_residual, solve_kkt
+from primal_dual_lipa.kkt_helpers import (
+    compute_kkt_residual,
+    factor_kkt,
+    solve_kkt,
+)
+from primal_dual_lipa.types import KKTFactorizationInputs, Parameters, Variables
 
 jax.config.update("jax_enable_x64", True)  # noqa: FBT003
 
@@ -66,8 +71,10 @@ class TestKKTSolves(unittest.TestCase):
         self.w_inv = z / s
 
         key, subkey = jax.random.split(key)
-        self.r_x = jax.random.uniform(subkey, (T + 1, n + m))
-        self.r_x = self.r_x.at[-1, n:].set(0.0)
+        self.r_x = jax.random.uniform(subkey, (T + 1, n))
+
+        key, subkey = jax.random.split(key)
+        self.r_u = jax.random.uniform(subkey, (T, m))
 
         key, subkey = jax.random.split(key)
         self.r_s = jax.random.uniform(subkey, (T + 1, g_dim))
@@ -81,62 +88,66 @@ class TestKKTSolves(unittest.TestCase):
         key, subkey = jax.random.split(key)
         self.r_z = jax.random.uniform(subkey, (T + 1, g_dim))
 
-        key, subkey = jax.random.split(key)
-        self.η = jnp.abs(jax.random.uniform(subkey, (1,)))[0]
+        self.parameters = Parameters(
+            µ=1e-3,
+            η_dyn=jnp.full((T + 1, n), 1e3),
+            η_eq=jnp.full((T + 1, c_dim), 1e3),
+            η_ineq=jnp.full((T + 1, g_dim), 1e3),
+        )
 
     def test(self) -> None:
         """Run the test."""
         for use_parallel_lqr in [False, True]:
             with self.subTest(use_parallel_lqr=use_parallel_lqr):
-                dX, dU, dS, dY_dyn, dY_eq, dZ = solve_kkt(
+                factorization_inputs = KKTFactorizationInputs(
                     P=self.P,
                     D=self.D,
                     E=self.E,
                     G=self.G,
                     w_inv=self.w_inv,
-                    r_x=self.r_x,
-                    r_s=self.r_s,
-                    r_y_dyn=self.r_y_dyn,
-                    r_y_eq=self.r_y_eq,
-                    r_z=self.r_z,
-                    η=self.η,
+                    params=self.parameters,
+                )
+                solve_inputs = Variables(
+                    X=self.r_x,
+                    U=self.r_u,
+                    S=self.r_s,
+                    Y_dyn=self.r_y_dyn,
+                    Y_eq=self.r_y_eq,
+                    Z=self.r_z,
+                )
+
+                factorization_outputs = factor_kkt(
+                    inputs=factorization_inputs,
                     use_parallel_lqr=use_parallel_lqr,
                 )
 
-                res_X, res_U, res_S, res_Y_dyn, res_Y_eq, res_Z = compute_kkt_residual(
-                    P=self.P,
-                    D=self.D,
-                    E=self.E,
-                    G=self.G,
-                    w_inv=self.w_inv,
-                    r_x=self.r_x,
-                    r_s=self.r_s,
-                    r_y_dyn=self.r_y_dyn,
-                    r_y_eq=self.r_y_eq,
-                    r_z=self.r_z,
-                    dX=dX,
-                    dU=dU,
-                    dS=dS,
-                    dY_dyn=dY_dyn,
-                    dY_eq=dY_eq,
-                    dZ=dZ,
-                    η=self.η,
+                deltas = solve_kkt(
+                    factorization_outputs=factorization_outputs,
+                    factorization_inputs=factorization_inputs,
+                    rhs=solve_inputs,
+                    use_parallel_lqr=use_parallel_lqr,
                 )
-                residual = jnp.concatenate(
+
+                residuals = compute_kkt_residual(
+                    factorization_inputs=factorization_inputs,
+                    solve_inputs=solve_inputs,
+                    solution=deltas,
+                )
+                residual_vec = jnp.concatenate(
                     [
-                        res_X.flatten(),
-                        res_U.flatten(),
-                        res_S.flatten(),
-                        res_Y_dyn.flatten(),
-                        res_Y_eq.flatten(),
-                        res_Z.flatten(),
+                        residuals.X.flatten(),
+                        residuals.U.flatten(),
+                        residuals.S.flatten(),
+                        residuals.Y_dyn.flatten(),
+                        residuals.Y_eq.flatten(),
+                        residuals.Z.flatten(),
                     ]
                 )
 
                 if use_parallel_lqr:
-                    self.assertLess(jnp.linalg.norm(residual), 1e-3)  # noqa: PT009
+                    self.assertLess(jnp.linalg.norm(residual_vec), 1e-3)  # noqa: PT009
                 else:
-                    self.assertLess(jnp.linalg.norm(residual), 1e-9)  # noqa: PT009
+                    self.assertLess(jnp.linalg.norm(residual_vec), 1e-9)  # noqa: PT009
 
 
 if __name__ == "__main__":

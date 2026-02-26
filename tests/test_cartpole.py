@@ -12,6 +12,7 @@ from jax import scipy as jsp
 from primal_dual_lipa.integrators import euler, rollout
 from primal_dual_lipa.lagrangian_helpers import pad
 from primal_dual_lipa.optimizers import SolverSettings, solve
+from primal_dual_lipa.types import Variables
 
 jax.config.update("jax_enable_x64", True)  # noqa: FBT003
 
@@ -90,9 +91,11 @@ def goal_equality(
 
 
 @jax.jit
-def inequalities(_x: jnp.ndarray, u: jnp.ndarray, _t: jnp.int32) -> jnp.ndarray:
+def inequalities(
+    _x: jnp.ndarray, u: jnp.ndarray, t: jnp.int32, T: jnp.int32
+) -> jnp.ndarray:
     """Define the control bounds."""
-    return jnp.array([u[0] - 5.0, -5.0 - u[0]])
+    return jnp.where(t == T, -jnp.ones(2), jnp.array([u[0] - 5.0, -5.0 - u[0]]))
 
 
 class TestCartpole(unittest.TestCase):
@@ -118,39 +121,42 @@ class TestCartpole(unittest.TestCase):
 
         equalities = partial(goal_equality, goal=goal, T=T)
 
+        inequalities_closure = partial(inequalities, T=T)
+
         U = jnp.zeros([T, m])
         # X = rollout(dynamics, U, x0)
         X = jnp.linspace(start=x0, stop=goal, num=T + 1)
-        S = jnp.zeros([T + 1, g_dim])
+        S = jnp.ones([T + 1, g_dim])
         Y_dyn = jnp.zeros_like(X)
         Y_eq = jnp.zeros([T + 1, c_dim])
-        Z = jnp.zeros([T + 1, g_dim])
+        Z = jnp.ones([T + 1, g_dim])
+
+        vars_in = Variables(X=X, U=U, S=S, Y_dyn=Y_dyn, Y_eq=Y_eq, Z=Z)
 
         # TODO(joao): only change print_logs, if possible.
         settings = SolverSettings(
-            µ_update_factor=0.99,
-            η_update_factor=1.1,
+            # µ_update_factor=0.99,
+            # η_update_factor=1.1,
+            num_iterative_refinement_steps=3,
+            # α_min=0.01,
             print_logs=True,
         )
 
         print("Cartpole problem")  # noqa: T201
-        X, U, S, Y_dyn, Y_eq, Z, iterations, no_errors = solve(
-            X_in=X,
-            U_in=U,
-            S_in=S,
-            Y_dyn_in=Y_dyn,
-            Y_eq_in=Y_eq,
-            Z_in=Z,
+        vars_out, iterations, no_errors = solve(
+            vars_in=vars_in,
             x0=x0,
             cost=cost,
             dynamics=dynamics,
             equalities=equalities,
-            inequalities=inequalities,
+            inequalities=inequalities_closure,
             settings=settings,
         )
         self.assertTrue(no_errors)  # noqa: PT009
         # TODO(joao): define the right value.
-        self.assertLess(jax.vmap(cost)(X, pad(U), jnp.arange(T + 1)).sum(), 102.0)  # noqa: PT009
+        self.assertLess(
+            jax.vmap(cost)(vars_out.X, pad(vars_out.U), jnp.arange(T + 1)).sum(), 102.0
+        )  # noqa: PT009
 
 
 if __name__ == "__main__":

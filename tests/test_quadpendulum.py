@@ -8,7 +8,9 @@ import jax
 from jax import numpy as jnp
 
 from primal_dual_lipa.integrators import euler
+from primal_dual_lipa.lagrangian_helpers import pad
 from primal_dual_lipa.optimizers import SolverSettings, solve
+from primal_dual_lipa.types import Variables
 
 jax.config.update("jax_enable_x64", True)  # noqa: FBT003
 
@@ -169,7 +171,7 @@ def obs_constraint(
 def cost(
     x: jnp.ndarray,
     u: jnp.ndarray,
-    t: jnp.double,
+    t: jnp.int32,
     goal: jnp.ndarray,
     weights: jnp.ndarray,
     Q_T: jnp.ndarray,
@@ -192,7 +194,7 @@ def cost(
 @jax.jit
 def state_constraint(
     x: jnp.ndarray,
-    t: jnp.double,
+    t: jnp.int32,
     obs: list[tuple[jnp.ndarray, jnp.double]],
     world_range: tuple[jnp.ndarray, jnp.ndarray],
     theta_lim: jnp.double,
@@ -203,22 +205,29 @@ def state_constraint(
     avoid_cons = obs_constraint(x[:4], obs=obs)
     world_cons = jnp.concatenate((-x[:2] + world_range[0], x[:2] - world_range[1]))
 
-    return jnp.concatenate((theta_cons, world_cons, avoid_cons))
+    return jnp.concatenate(
+        (
+            theta_cons,
+            world_cons,
+            avoid_cons,
+        )
+    )
 
 
 @jax.jit
 def inequalities(
     x: jnp.ndarray,
     u: jnp.ndarray,
-    t: jnp.double,
+    t: jnp.int32,
+    T: jnp.int32,
     obs: list[tuple[jnp.ndarray, jnp.double]],
     world_range: tuple[jnp.ndarray, jnp.ndarray],
     theta_lim: jnp.double,
     control_bounds: tuple[jnp.ndarray, jnp.ndarray],
 ) -> jnp.ndarray:
     """Define the inequality constraints."""
-    control_delta_lb = control_bounds[0] - u
-    control_delta_ub = u - control_bounds[1]
+    control_delta_lb = jnp.where(t == T, -jnp.ones_like(u), control_bounds[0] - u)
+    control_delta_ub = jnp.where(t == T, -jnp.ones_like(u), u - control_bounds[1])
     return jnp.concatenate(
         [
             state_constraint(
@@ -235,7 +244,6 @@ class TestQuadpendulum(unittest.TestCase):
 
     def test(self) -> None:
         """Run the test."""
-
         key = jax.random.PRNGKey(1234)
 
         # Confirm mass matrix and inverse computation
@@ -270,15 +278,28 @@ class TestQuadpendulum(unittest.TestCase):
             3.0 * Mass * grav * jnp.ones((m,)),
         )
 
+        cost_closure = partial(cost, goal=goal, weights=weights, Q_T=Q_T)
+
+        inequalities_closure = partial(
+            inequalities,
+            T=T,
+            obs=obs,
+            world_range=world_range,
+            theta_lim=theta_lim,
+            control_bounds=control_bounds,
+        )
+
         c_dim = 0
-        g_dim = 2 * m + 2 + 4 + 2 * len(obs)
+        g_dim = inequalities_closure(jnp.zeros(n), jnp.zeros(m), 0).size
 
         X = jnp.tile(x0, (T + 1, 1))
         U = jnp.tile(u_hover, (T, 1))
-        S = jnp.zeros([T + 1, g_dim])
+        S = -jax.vmap(inequalities_closure)(X, pad(U), jnp.arange(T + 1))
         Y_dyn = jnp.zeros_like(X)
         Y_eq = jnp.zeros([T + 1, c_dim])
-        Z = jnp.zeros([T + 1, g_dim])
+        Z = jnp.ones([T + 1, g_dim])
+
+        vars_in = Variables(X=X, U=U, S=S, Y_dyn=Y_dyn, Y_eq=Y_eq, Z=Z)
 
         settings = SolverSettings(
             η0=10.0,
@@ -288,26 +309,16 @@ class TestQuadpendulum(unittest.TestCase):
             µ_update_factor=0.9,
             µ_min=1e-9,
             print_logs=True,
+            print_ls_logs=True,
         )
 
         print("Quadpendulum problem")  # noqa: T201
-        X, U, S, Y_dyn, Y_eq, Z, iterations, no_errors = solve(
-            X_in=X,
-            U_in=U,
-            S_in=S,
-            Y_dyn_in=Y_dyn,
-            Y_eq_in=Y_eq,
-            Z_in=Z,
+        vars_out, iterations, no_errors = solve(
+            vars_in=vars_in,
             x0=x0,
-            cost=partial(cost, goal=goal, weights=weights, Q_T=Q_T),
+            cost=cost_closure,
             dynamics=dynamics,
-            inequalities=partial(
-                inequalities,
-                obs=obs,
-                world_range=world_range,
-                theta_lim=theta_lim,
-                control_bounds=control_bounds,
-            ),
+            inequalities=inequalities_closure,
             settings=settings,
         )
         self.assertTrue(no_errors)  # noqa: PT009
