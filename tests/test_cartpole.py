@@ -140,6 +140,7 @@ class TestCartpole(unittest.TestCase):
             num_iterative_refinement_steps=3,
             # α_min=0.01,
             print_logs=True,
+            # print_ls_logs=True,
         )
 
         print("Cartpole problem")  # noqa: T201

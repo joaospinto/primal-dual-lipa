@@ -301,15 +301,20 @@ class TestQuadpendulum(unittest.TestCase):
 
         vars_in = Variables(X=X, U=U, S=S, Y_dyn=Y_dyn, Y_eq=Y_eq, Z=Z)
 
+        # TODO(joao): only change print_logs, if possible.
         settings = SolverSettings(
+            max_iterations=1000,
+            residual_sq_threshold=1e-12,
+            α_min=0.1,
             η0=10.0,
-            η_max=1e8,
+            η_max=1e9,
             η_update_factor=1.1,
             µ0=0.1,
             µ_update_factor=0.9,
-            µ_min=1e-9,
+            µ_min=1e-16,
+            num_iterative_refinement_steps=1,
             print_logs=True,
-            print_ls_logs=True,
+            # print_ls_logs=True,
         )
 
         print("Quadpendulum problem")  # noqa: T201
@@ -322,6 +327,12 @@ class TestQuadpendulum(unittest.TestCase):
             settings=settings,
         )
         self.assertTrue(no_errors)  # noqa: PT009
+        self.assertLess(
+            jax.vmap(cost_closure)(
+                vars_out.X, pad(vars_out.U), jnp.arange(T + 1)
+            ).sum(),
+            9.4,
+        )  # noqa: PT009
 
 
 if __name__ == "__main__":
