@@ -61,22 +61,12 @@ def cartpole(
     return f + g * action
 
 
-def angle_wrap(th: jnp.double) -> jnp.double:
-    """Wrap the input angle."""
-    return (th) % (2 * jnp.pi)
-
-
-def state_wrap(s: jnp.ndarray) -> jnp.ndarray:
-    """Wrap the angles in the state."""
-    return jnp.array([s[0], angle_wrap(s[1]), s[2], s[3]])
-
-
 @jax.jit
 def goal_cost(
     x: jnp.ndarray, u: jnp.ndarray, t: jnp.int32, goal: jnp.int32, T: jnp.int32
 ) -> jnp.double:
     """Define the cost."""
-    err = state_wrap(x - goal)
+    err = x - goal
     stage_cost = 0.1 * jnp.dot(err, err) + 0.01 * jnp.dot(u, u)
     final_cost = 1000 * jnp.dot(err, err)
     return jnp.where(t == T, final_cost, stage_cost)
@@ -87,7 +77,7 @@ def goal_equality(
     x: jnp.ndarray, _u: jnp.ndarray, t: jnp.int32, goal: jnp.int32, T: jnp.int32
 ) -> jnp.ndarray:
     """Define the final state constraint."""
-    return jnp.where(t == T, state_wrap(x - goal), jnp.zeros_like(x))
+    return jnp.where(t == T, x - goal, jnp.zeros_like(x))
 
 
 @jax.jit
@@ -135,12 +125,13 @@ class TestCartpole(unittest.TestCase):
 
         # TODO(joao): only change print_logs, if possible.
         settings = SolverSettings(
-            # µ_update_factor=0.99,
-            # η_update_factor=1.1,
-            num_iterative_refinement_steps=3,
-            # α_min=0.01,
+            η0=10.0,
+            η_update_factor=1.1,
+            µ0=0.1,
+            µ_update_factor=0.95,
+            num_iterative_refinement_steps=1,
             print_logs=True,
-            # print_ls_logs=True,
+            # print_ls_logs=True
         )
 
         print("Cartpole problem")  # noqa: T201
@@ -154,9 +145,8 @@ class TestCartpole(unittest.TestCase):
             settings=settings,
         )
         self.assertTrue(no_errors)  # noqa: PT009
-        # TODO(joao): define the right value.
         self.assertLess(
-            jax.vmap(cost)(vars_out.X, pad(vars_out.U), jnp.arange(T + 1)).sum(), 102.0
+            jax.vmap(cost)(vars_out.X, pad(vars_out.U), jnp.arange(T + 1)).sum(), 67.0
         )  # noqa: PT009
 
 

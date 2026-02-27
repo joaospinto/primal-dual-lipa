@@ -180,6 +180,17 @@ def solve(
             (deltas, 0),
         )
 
+        def compute_alpha_max(v, dv, τ):
+            mask = dv < 0
+            safe_dv = jnp.where(mask, dv, -1.0)
+            alphas = jnp.where(mask, -(τ * v) / safe_dv, 1.0)
+            return jnp.min(jnp.concatenate([alphas.flatten(), jnp.array([1.0])]))
+
+        α_max_s = compute_alpha_max(vars.S, deltas.S, settings.τ)
+        α_max_z = compute_alpha_max(vars.Z, deltas.Z, settings.τ)
+        α_max = jnp.minimum(α_max_s, α_max_z)
+        α_max = jnp.minimum(α_max, 1.0)
+
         T_range = jnp.arange(T)
         Tp1_range = jnp.arange(T + 1)
 
@@ -253,7 +264,7 @@ def solve(
         α = jax.lax.while_loop(
             line_search_loop_continuation_criteria,
             line_search_loop_body,
-            1.0,
+            α_max,
         )
 
         if settings.print_logs:
