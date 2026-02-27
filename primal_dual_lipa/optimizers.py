@@ -406,7 +406,7 @@ def solve(
         ],
     ) -> jnp.bool:
         (
-            _unused_vars,
+            vars,
             _unused_params,
             kkt_system,
             iteration,
@@ -415,7 +415,9 @@ def solve(
             [
                 kkt_system.rhs.X.flatten(),
                 kkt_system.rhs.U.flatten(),
-                kkt_system.rhs.S.flatten(),
+                # Ensure we check sz - µe instead of z - µ / s.
+                # Alternatively, we could also just check sz.
+                (vars.S * kkt_system.rhs.S).flatten(),
                 kkt_system.rhs.Y_dyn.flatten(),
                 kkt_system.rhs.Y_eq.flatten(),
                 kkt_system.rhs.Z.flatten(),
