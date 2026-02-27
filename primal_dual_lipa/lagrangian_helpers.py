@@ -4,6 +4,7 @@ import jax
 from jax import numpy as jnp
 
 from primal_dual_lipa.types import CostFunction, Function, Parameters, Variables
+from primal_dual_lipa.vectorization_helpers import vectorize
 
 
 def pad(A: jnp.ndarray) -> jnp.ndarray:
@@ -24,6 +25,7 @@ def build_lagrangian(  # noqa: ANN201
     def lagrangian(
         X: jnp.ndarray,
         U: jnp.ndarray,
+        Theta: jnp.ndarray,
         t: jnp.int32,
         S: jnp.ndarray,
         next_Y_dyn: jnp.ndarray,
@@ -31,12 +33,12 @@ def build_lagrangian(  # noqa: ANN201
         Y_eq: jnp.ndarray,
         Z: jnp.ndarray,
     ) -> jnp.double:
-        c1 = cost(X, U, t)
-        c2 = jnp.dot(next_Y_dyn, dynamics(X, U, t))
+        c1 = cost(X, U, Theta, t)
+        c2 = jnp.dot(next_Y_dyn, dynamics(X, U, Theta, t))
         c3 = jnp.dot(Y_dyn, jax.lax.select(t == 0, x0 - X, -X))
         c4 = -µ * jnp.sum(jnp.log(S))
-        c5 = jnp.dot(Y_eq, equalities(X, U, t))
-        c6 = jnp.dot(Z, inequalities(X, U, t) + S)
+        c5 = jnp.dot(Y_eq, equalities(X, U, Theta, t))
+        c6 = jnp.dot(Z, inequalities(X, U, Theta, t) + S)
         return c1 + c2 + c3 + c4 + c5 + c6
 
     return lagrangian
@@ -70,29 +72,34 @@ def build_total_augmented_lagrangian(  # noqa: ANN201
         U_pad = pad(vars.U)
         next_Y_dyn = pad(vars.Y_dyn[1:])
         c1 = jnp.sum(
-            jax.vmap(
-                lambda t: lagrangian(
-                    X=vars.X[t],
-                    U=U_pad[t],
-                    t=t,
-                    S=vars.S[t],
-                    next_Y_dyn=next_Y_dyn[t],
-                    Y_dyn=vars.Y_dyn[t],
-                    Y_eq=vars.Y_eq[t],
-                    Z=vars.Z[t],
-                )
-            )(Tp1_range)
+            vectorize(lagrangian)(
+                vars.X,
+                U_pad,
+                vars.Theta,
+                Tp1_range,
+                vars.S,
+                next_Y_dyn,
+                vars.Y_dyn,
+                vars.Y_eq,
+                vars.Z,
+            )
         )
         c2 = 0.5 * jnp.sum(
-            params.η_eq * jnp.square(jax.vmap(equalities)(vars.X, U_pad, Tp1_range))
+            params.η_eq
+            * jnp.square(vectorize(equalities)(vars.X, U_pad, vars.Theta, Tp1_range))
         )
         c3 = 0.5 * jnp.sum(
             params.η_ineq
-            * jnp.square(jax.vmap(inequalities)(vars.X, U_pad, Tp1_range) + vars.S)
+            * jnp.square(
+                vectorize(inequalities)(vars.X, U_pad, vars.Theta, Tp1_range) + vars.S
+            )
         )
         c4 = 0.5 * jnp.sum(
             params.η_dyn[1:]
-            * jnp.square(jax.vmap(dynamics)(vars.X[:-1], vars.U, T_range) - vars.X[1:])
+            * jnp.square(
+                vectorize(dynamics)(vars.X[:-1], vars.U, vars.Theta, T_range)
+                - vars.X[1:]
+            )
         )
         c5 = 0.5 * jnp.sum(params.η_dyn[0] * jnp.square(x0 - vars.X[0]))
         return c1 + c2 + c3 + c4 + c5
@@ -112,7 +119,7 @@ def directional_augmented_lagrangian(  # noqa: ANN201
     vars: Variables,
     deltas: Variables,
 ):
-    """Define the directional Augmented Lagrangian used in the line search."""
+    """Define the directional Augmented Lagrangian used in the line search"""
     augmented_lagrangian = build_total_augmented_lagrangian(
         cost=cost,
         dynamics=dynamics,
@@ -132,6 +139,7 @@ def directional_augmented_lagrangian(  # noqa: ANN201
                 Y_dyn=vars.Y_dyn,
                 Y_eq=vars.Y_eq,
                 Z=vars.Z,
+                Theta=(vars.Theta + α * deltas.Theta),
             )
         )
 

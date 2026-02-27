@@ -11,13 +11,17 @@ from primal_dual_lipa.kkt_helpers import (
     factor_kkt,
     solve_kkt,
 )
-from primal_dual_lipa.types import KKTFactorizationInputs, Parameters, Variables
+from primal_dual_lipa.types import (
+    KKTFactorizationInputs,
+    Parameters,
+    Variables,
+)
 
 jax.config.update("jax_enable_x64", True)  # noqa: FBT003
 
 
 class TestKKTSolves(unittest.TestCase):
-    """Test the KKT helpers."""
+    """Test solving the KKT system."""
 
     def setUp(self) -> None:
         """Set up the unit test."""
@@ -27,6 +31,7 @@ class TestKKTSolves(unittest.TestCase):
 
         c_dim = 3
         g_dim = 3
+        p_dim = 2
 
         self.T = T
 
@@ -88,11 +93,24 @@ class TestKKTSolves(unittest.TestCase):
         key, subkey = jax.random.split(key)
         self.r_z = jax.random.uniform(subkey, (T + 1, g_dim))
 
+        # Global parameter initializations
+        key, subkey = jax.random.split(key)
+        self.Theta = jax.random.uniform(subkey, (p_dim,))
+        self.r_theta = jax.random.uniform(subkey, (p_dim,))
+        self.H_theta_theta = jax.random.uniform(subkey, (p_dim, p_dim))
+        self.H_theta_theta = symmetrize(self.H_theta_theta) + jnp.eye(p_dim)
+
+        self.H_theta_X = jax.random.uniform(subkey, (T + 1, n, p_dim))
+        self.H_theta_U = jax.random.uniform(subkey, (T, m, p_dim))
+        self.H_theta_y_dyn = jax.random.uniform(subkey, (T + 1, n, p_dim))
+        self.H_theta_y_eq = jax.random.uniform(subkey, (T + 1, c_dim, p_dim))
+        self.H_theta_z = jax.random.uniform(subkey, (T + 1, g_dim, p_dim))
+
         self.parameters = Parameters(
-            µ=1e-3,
-            η_dyn=jnp.full((T + 1, n), 1e3),
-            η_eq=jnp.full((T + 1, c_dim), 1e3),
-            η_ineq=jnp.full((T + 1, g_dim), 1e3),
+            η_dyn=jnp.ones((T + 1, n)) * 10.0,
+            η_eq=jnp.ones((T + 1, c_dim)) * 10.0,
+            η_ineq=jnp.ones((T + 1, g_dim)) * 10.0,
+            µ=0.1,
         )
 
     def test(self) -> None:
@@ -106,6 +124,12 @@ class TestKKTSolves(unittest.TestCase):
                     G=self.G,
                     w_inv=self.w_inv,
                     params=self.parameters,
+                    H_theta_theta=self.H_theta_theta,
+                    H_theta_X=self.H_theta_X,
+                    H_theta_U=self.H_theta_U,
+                    H_theta_y_dyn=self.H_theta_y_dyn,
+                    H_theta_y_eq=self.H_theta_y_eq,
+                    H_theta_z=self.H_theta_z,
                 )
                 solve_inputs = Variables(
                     X=self.r_x,
@@ -114,6 +138,7 @@ class TestKKTSolves(unittest.TestCase):
                     Y_dyn=self.r_y_dyn,
                     Y_eq=self.r_y_eq,
                     Z=self.r_z,
+                    Theta=self.r_theta,
                 )
 
                 factorization_outputs = factor_kkt(
@@ -141,6 +166,7 @@ class TestKKTSolves(unittest.TestCase):
                         residuals.Y_dyn.flatten(),
                         residuals.Y_eq.flatten(),
                         residuals.Z.flatten(),
+                        residuals.Theta.flatten(),
                     ]
                 )
 

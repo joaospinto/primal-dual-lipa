@@ -14,11 +14,10 @@ from regularized_lqr_jax.types import (
 from regularized_lqr_jax.types import (
     SequentialFactorizationOutputs as LQRSequentialFactorizationOutputs,
 )
-from regularized_lqr_jax.types import SolveOutputs as LQRSolveOutputs
 
 
 @jax.tree_util.register_dataclass
-@dataclass
+@dataclass(frozen=True)
 class SolverSettings:
     """Encapsulate a few solver settings."""
 
@@ -41,8 +40,8 @@ class SolverSettings:
     print_ls_logs: jnp.bool = field(default=False, metadata={"static": True})
 
 
-Function = Callable[[jnp.ndarray, jnp.ndarray, jnp.int32], jnp.ndarray]
-CostFunction = Callable[[jnp.ndarray, jnp.ndarray, jnp.int32], jnp.double]
+Function = Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.int32], jnp.ndarray]
+CostFunction = Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.int32], jnp.double]
 
 
 @jax.tree_util.register_dataclass
@@ -67,6 +66,12 @@ class KKTFactorizationInputs:
     G: jnp.ndarray
     w_inv: jnp.ndarray
     params: Parameters
+    H_theta_theta: jnp.ndarray
+    H_theta_X: jnp.ndarray
+    H_theta_U: jnp.ndarray
+    H_theta_y_dyn: jnp.ndarray
+    H_theta_y_eq: jnp.ndarray
+    H_theta_z: jnp.ndarray
 
 
 @jax.tree_util.register_dataclass
@@ -76,6 +81,13 @@ class KKTFactorizationOutputs:
 
     lqr_inputs: LQRFactorizationInputs
     lqr_outputs: LQRSequentialFactorizationOutputs | LQRParallelFactorizationOutputs
+    schur_complement: jnp.ndarray
+    B_inv_C_X: jnp.ndarray
+    B_inv_C_U: jnp.ndarray
+    B_inv_C_S: jnp.ndarray
+    B_inv_C_Y_dyn: jnp.ndarray
+    B_inv_C_Y_eq: jnp.ndarray
+    B_inv_C_Z: jnp.ndarray
 
 
 @jax.tree_util.register_dataclass
@@ -89,6 +101,7 @@ class Variables:
     Y_dyn: jnp.ndarray
     Y_eq: jnp.ndarray
     Z: jnp.ndarray
+    Theta: jnp.ndarray
 
 
 @jax.tree_util.register_dataclass

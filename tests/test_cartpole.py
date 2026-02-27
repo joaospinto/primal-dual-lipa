@@ -9,10 +9,11 @@ import jax
 from jax import numpy as jnp
 from jax import scipy as jsp
 
-from primal_dual_lipa.integrators import euler, rollout
+from primal_dual_lipa.integrators import euler
 from primal_dual_lipa.lagrangian_helpers import pad
 from primal_dual_lipa.optimizers import SolverSettings, solve
 from primal_dual_lipa.types import Variables
+from primal_dual_lipa.vectorization_helpers import vectorize
 
 jax.config.update("jax_enable_x64", True)  # noqa: FBT003
 
@@ -21,6 +22,7 @@ jax.config.update("jax_enable_x64", True)  # noqa: FBT003
 def cartpole(
     state: jnp.ndarray,
     action: jnp.ndarray,
+    theta: jnp.ndarray,
     timestep: jnp.double,
     params: jnp.ndarray,
 ) -> jnp.ndarray:
@@ -29,6 +31,7 @@ def cartpole(
     Args:
       state: state, (4, ) array
       action: control, (1, ) array
+      theta: unused empty global optimization parameters
       timestep: scalar time
       params: tuple of (MASS_CART, MASS_POLE, LENGTH_POLE)
 
@@ -36,7 +39,7 @@ def cartpole(
       xdot: state time derivative, (4, )
 
     """
-    del timestep  # Unused
+    del timestep, theta  # Unused
 
     mc, mp, l = params  # noqa: E741
     g = 9.81
@@ -63,9 +66,15 @@ def cartpole(
 
 @jax.jit
 def goal_cost(
-    x: jnp.ndarray, u: jnp.ndarray, t: jnp.int32, goal: jnp.int32, T: jnp.int32
+    x: jnp.ndarray,
+    u: jnp.ndarray,
+    theta: jnp.ndarray,
+    t: jnp.int32,
+    goal: jnp.int32,
+    T: jnp.int32,
 ) -> jnp.double:
     """Define the cost."""
+    del theta  # Unused
     err = x - goal
     stage_cost = 0.1 * jnp.dot(err, err) + 0.01 * jnp.dot(u, u)
     final_cost = 1000 * jnp.dot(err, err)
@@ -74,17 +83,28 @@ def goal_cost(
 
 @jax.jit
 def goal_equality(
-    x: jnp.ndarray, _u: jnp.ndarray, t: jnp.int32, goal: jnp.int32, T: jnp.int32
+    x: jnp.ndarray,
+    _u: jnp.ndarray,
+    theta: jnp.ndarray,
+    t: jnp.int32,
+    goal: jnp.int32,
+    T: jnp.int32,
 ) -> jnp.ndarray:
     """Define the final state constraint."""
+    del theta  # Unused
     return jnp.where(t == T, x - goal, jnp.zeros_like(x))
 
 
 @jax.jit
 def inequalities(
-    _x: jnp.ndarray, u: jnp.ndarray, t: jnp.int32, T: jnp.int32
+    _x: jnp.ndarray,
+    u: jnp.ndarray,
+    theta: jnp.ndarray,
+    t: jnp.int32,
+    T: jnp.int32,
 ) -> jnp.ndarray:
     """Define the control bounds."""
+    del theta  # Unused
     return jnp.where(t == T, -jnp.ones(2), jnp.array([u[0] - 5.0, -5.0 - u[0]]))
 
 
@@ -121,7 +141,9 @@ class TestCartpole(unittest.TestCase):
         Y_eq = jnp.zeros([T + 1, c_dim])
         Z = jnp.ones([T + 1, g_dim])
 
-        vars_in = Variables(X=X, U=U, S=S, Y_dyn=Y_dyn, Y_eq=Y_eq, Z=Z)
+        vars_in = Variables(
+            X=X, U=U, S=S, Y_dyn=Y_dyn, Y_eq=Y_eq, Z=Z, Theta=jnp.empty(0)
+        )
 
         # TODO(joao): only change print_logs, if possible.
         settings = SolverSettings(
@@ -131,7 +153,7 @@ class TestCartpole(unittest.TestCase):
             µ_update_factor=0.95,
             num_iterative_refinement_steps=1,
             print_logs=True,
-            # print_ls_logs=True
+            # print_ls_logs=True,
         )
 
         print("Cartpole problem")  # noqa: T201
@@ -146,7 +168,10 @@ class TestCartpole(unittest.TestCase):
         )
         self.assertTrue(no_errors)  # noqa: PT009
         self.assertLess(
-            jax.vmap(cost)(vars_out.X, pad(vars_out.U), jnp.arange(T + 1)).sum(), 67.0
+            vectorize(cost)(
+                vars_out.X, pad(vars_out.U), vars_out.Theta, jnp.arange(T + 1)
+            ).sum(),
+            67.0,
         )  # noqa: PT009
 
 

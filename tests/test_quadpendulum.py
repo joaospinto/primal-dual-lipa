@@ -11,6 +11,7 @@ from primal_dual_lipa.integrators import euler
 from primal_dual_lipa.lagrangian_helpers import pad
 from primal_dual_lipa.optimizers import SolverSettings, solve
 from primal_dual_lipa.types import Variables
+from primal_dual_lipa.vectorization_helpers import vectorize
 
 jax.config.update("jax_enable_x64", True)  # noqa: FBT003
 
@@ -90,8 +91,11 @@ def get_mass_inv(q: jnp.ndarray) -> jnp.ndarray:
 
 
 @jax.jit
-def ode(x: jnp.ndarray, u: jnp.ndarray, t: jnp.double) -> jnp.ndarray:
+def ode(
+    x: jnp.ndarray, u: jnp.ndarray, theta: jnp.ndarray, t: jnp.double
+) -> jnp.ndarray:
     """Provide the dynamics ODE."""
+    del theta
 
     def kinetic(q: jnp.ndarray, q_dot: jnp.ndarray) -> jnp.ndarray:
         """Define the kinetic energy."""
@@ -145,10 +149,15 @@ def obs_constraint(
         return x + t_min * (y - x)
 
     pos = q[:2]
-    theta = q[2]
+    theta_quad = q[2]
     phi = q[-1]
 
-    R = jnp.array([[jnp.cos(theta), -jnp.sin(theta)], [jnp.sin(theta), jnp.cos(theta)]])
+    R = jnp.array(
+        [
+            [jnp.cos(theta_quad), -jnp.sin(theta_quad)],
+            [jnp.sin(theta_quad), jnp.cos(theta_quad)],
+        ]
+    )
     pos_c = pos + R @ jnp.array([0.0, 0.15 * l])
     pole = (pos, pos + jnp.array([L * jnp.sin(phi), -L * jnp.cos(phi)]))
 
@@ -171,12 +180,14 @@ def obs_constraint(
 def cost(
     x: jnp.ndarray,
     u: jnp.ndarray,
+    theta: jnp.ndarray,
     t: jnp.int32,
     goal: jnp.ndarray,
     weights: jnp.ndarray,
     Q_T: jnp.ndarray,
 ) -> jnp.double:
     """Define the problem cost."""
+    del theta
     # Do angle wrapping on theta and phi
     s1_ind = (2, 3)
     state_wrap = get_s1_wrapper(s1_ind)
@@ -194,13 +205,14 @@ def cost(
 @jax.jit
 def state_constraint(
     x: jnp.ndarray,
+    theta: jnp.ndarray,
     t: jnp.int32,
     obs: list[tuple[jnp.ndarray, jnp.double]],
     world_range: tuple[jnp.ndarray, jnp.ndarray],
     theta_lim: jnp.double,
 ) -> jnp.ndarray:
     """Define the state constraints."""
-    del t
+    del theta, t
     theta_cons = jnp.array((x[2] - theta_lim, -x[2] - theta_lim))
     avoid_cons = obs_constraint(x[:4], obs=obs)
     world_cons = jnp.concatenate((-x[:2] + world_range[0], x[:2] - world_range[1]))
@@ -218,6 +230,7 @@ def state_constraint(
 def inequalities(
     x: jnp.ndarray,
     u: jnp.ndarray,
+    theta: jnp.ndarray,
     t: jnp.int32,
     T: jnp.int32,
     obs: list[tuple[jnp.ndarray, jnp.double]],
@@ -231,7 +244,7 @@ def inequalities(
     return jnp.concatenate(
         [
             state_constraint(
-                x, t, obs=obs, world_range=world_range, theta_lim=theta_lim
+                x, theta, t, obs=obs, world_range=world_range, theta_lim=theta_lim
             ),
             control_delta_lb,
             control_delta_ub,
@@ -290,16 +303,18 @@ class TestQuadpendulum(unittest.TestCase):
         )
 
         c_dim = 0
-        g_dim = inequalities_closure(jnp.zeros(n), jnp.zeros(m), 0).size
+        g_dim = inequalities_closure(jnp.zeros(n), jnp.zeros(m), jnp.empty(0), 0).size
 
         X = jnp.tile(x0, (T + 1, 1))
         U = jnp.tile(u_hover, (T, 1))
-        S = -jax.vmap(inequalities_closure)(X, pad(U), jnp.arange(T + 1))
+        S = -vectorize(inequalities_closure)(X, pad(U), jnp.empty(0), jnp.arange(T + 1))
         Y_dyn = jnp.zeros_like(X)
         Y_eq = jnp.zeros([T + 1, c_dim])
         Z = jnp.ones([T + 1, g_dim])
 
-        vars_in = Variables(X=X, U=U, S=S, Y_dyn=Y_dyn, Y_eq=Y_eq, Z=Z)
+        vars_in = Variables(
+            X=X, U=U, S=S, Y_dyn=Y_dyn, Y_eq=Y_eq, Z=Z, Theta=jnp.empty(0)
+        )
 
         # TODO(joao): only change print_logs, if possible.
         settings = SolverSettings(
@@ -328,8 +343,8 @@ class TestQuadpendulum(unittest.TestCase):
         )
         self.assertTrue(no_errors)  # noqa: PT009
         self.assertLess(
-            jax.vmap(cost_closure)(
-                vars_out.X, pad(vars_out.U), jnp.arange(T + 1)
+            vectorize(cost_closure)(
+                vars_out.X, pad(vars_out.U), vars_out.Theta, jnp.arange(T + 1)
             ).sum(),
             9.4,
         )  # noqa: PT009

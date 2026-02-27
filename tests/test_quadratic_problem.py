@@ -18,14 +18,20 @@ class TestLqrSolve(unittest.TestCase):
         """Run the test."""
 
         @jax.jit
-        def dynamics(x: jnp.ndarray, u: jnp.ndarray, t: jnp.double) -> jnp.ndarray:
+        def dynamics(
+            x: jnp.ndarray, u: jnp.ndarray, theta: jnp.ndarray, t: jnp.int32
+        ) -> jnp.ndarray:
+            del theta
             A = 6 * t * jnp.ones([2, 2]) + jnp.arange(4).reshape([2, 2])
             B = 6 * t * jnp.ones([2, 1]) + jnp.arange(4, 6).reshape([2, 1])
             c = 6 * t * jnp.ones(2) + jnp.arange(6, 8)
             return A @ x + B @ u + c
 
         @jax.jit
-        def cost(x: jnp.ndarray, u: jnp.ndarray, t: jnp.double) -> jnp.double:
+        def cost(
+            x: jnp.ndarray, u: jnp.ndarray, theta: jnp.ndarray, t: jnp.int32
+        ) -> jnp.double:
+            del theta
             Q = (t + 1) * jnp.diag(jnp.arange(1, 3))
             R = (t + 1) * jnp.array([3.0]).reshape([1, 1])
             q = -(t + 1) * jnp.arange(91, 93)
@@ -50,7 +56,9 @@ class TestLqrSolve(unittest.TestCase):
         Y_eq = jnp.zeros([T + 1, c_dim])
         Z = jnp.zeros([T + 1, g_dim])
 
-        vars_in = Variables(X=X, U=U, S=S, Y_dyn=Y_dyn, Y_eq=Y_eq, Z=Z)
+        vars_in = Variables(
+            X=X, U=U, S=S, Y_dyn=Y_dyn, Y_eq=Y_eq, Z=Z, Theta=jnp.empty(0)
+        )
 
         settings = SolverSettings(print_logs=True)
 

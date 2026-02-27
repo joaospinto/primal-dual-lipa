@@ -12,13 +12,18 @@ from primal_dual_lipa.integrators import euler
 from primal_dual_lipa.lagrangian_helpers import pad
 from primal_dual_lipa.optimizers import SolverSettings, solve
 from primal_dual_lipa.types import Variables
+from primal_dual_lipa.vectorization_helpers import vectorize
 
 jax.config.update("jax_enable_x64", True)  # noqa: FBT003
 
 
 @jax.jit
 def acrobot(
-    x: jnp.ndarray, u: jnp.ndarray, t: jnp.double, params: jnp.ndarray
+    x: jnp.ndarray,
+    u: jnp.ndarray,
+    theta: jnp.ndarray,
+    t: jnp.double,
+    params: jnp.ndarray,
 ) -> jnp.ndarray:
     """Classic Acrobot system.
 
@@ -28,6 +33,7 @@ def acrobot(
     Args:
       x: state, (4, ) array
       u: control, (1, ) array
+      theta: unused empty global optimization parameters
       t: scalar time. Disregarded because system is time-invariant.
       params: tuple of (LINK_MASS_1, LINK_MASS_2, LINK_LENGTH_1, LINK_COM_POS_1,
         LINK_COM_POS_2 LINK_MOI_1, LINK_MOI_2)
@@ -36,7 +42,7 @@ def acrobot(
       xdot: state time derivative, (4, )
 
     """
-    del t  # Unused
+    del t, theta  # Unused
 
     m1, m2, l1, lc1, lc2, I1, I2 = params
     g = 9.8
@@ -65,12 +71,14 @@ def acrobot(
 def goal_cost(
     x: jnp.ndarray,
     u: jnp.ndarray,
+    theta: jnp.ndarray,
     t: jnp.int32,
     params: jnp.ndarray,
     goal: jnp.ndarray,
     T: jnp.int32,
 ) -> jnp.double:
     """Define the cost function."""
+    del theta  # Unused
     delta = x - goal
     terminal_cost = 0.5 * params[0] * jnp.dot(delta, delta)
     stagewise_cost = 0.5 * params[1] * jnp.dot(delta, delta) + 0.5 * params[
@@ -107,7 +115,9 @@ class TestAcrobot(unittest.TestCase):
         Y_eq = jnp.zeros([T + 1, c_dim])
         Z = jnp.zeros([T + 1, g_dim])
 
-        vars_in = Variables(X=X, U=U, S=S, Y_dyn=Y_dyn, Y_eq=Y_eq, Z=Z)
+        vars_in = Variables(
+            X=X, U=U, S=S, Y_dyn=Y_dyn, Y_eq=Y_eq, Z=Z, Theta=jnp.empty(0)
+        )
 
         x0 = jnp.zeros(n)
 
@@ -123,7 +133,10 @@ class TestAcrobot(unittest.TestCase):
         )
         self.assertTrue(no_errors)  # noqa: PT009
         self.assertLess(
-            jax.vmap(cost)(vars_out.X, pad(vars_out.U), jnp.arange(T + 1)).sum(), 45.0
+            vectorize(cost)(
+                vars_out.X, pad(vars_out.U), vars_out.Theta, jnp.arange(T + 1)
+            ).sum(),
+            45.0,
         )  # noqa: PT009
 
 

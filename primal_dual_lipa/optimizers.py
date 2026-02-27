@@ -20,6 +20,7 @@ from primal_dual_lipa.types import (
     SolverSettings,
     Variables,
 )
+from primal_dual_lipa.vectorization_helpers import vectorize
 
 
 @partial(
@@ -29,6 +30,7 @@ from primal_dual_lipa.types import (
         "dynamics",
         "equalities",
         "inequalities",
+        "settings",
     ],
 )
 def solve(
@@ -37,22 +39,22 @@ def solve(
     cost: CostFunction,
     dynamics: Function,
     settings: SolverSettings,
-    equalities: Function = lambda x, u, t: jnp.empty(0),
-    inequalities: Function = lambda x, u, t: jnp.empty(0),
+    equalities: Function = lambda x, u, theta, t: jnp.empty(0),
+    inequalities: Function = lambda x, u, theta, t: jnp.empty(0),
 ) -> tuple[Variables, jnp.int32, jnp.bool]:
     """Implement the Primal-Dual LIPA algorithm for discrete-time optimal control.
 
     Args:
-      vars_in:       Variables object containing warm-start values for X, U, S, Y_dyn, Y_eq, Z.
+      vars_in:       Variables object containing warm-start values for X, U, S, Y_dyn, Y_eq, Z, Theta.
       x0:            [n]           numpy array (initial state).
-      cost:          cost function with signature cost(x, u, t).
-      dynamics:      dynamics function with signature dynamics(x, u, t).
-      equalities:    equalities(x, u, t) = 0 should hold; output is (c_dim,).
-      inequalities:  inequalities(x, u, t) <= 0 should hold; output is (g_dim,).
+      cost:          cost function with signature cost(x, u, theta, t).
+      dynamics:      dynamics function with signature dynamics(x, u, theta, t).
+      equalities:    equalities(x, u, theta, t) = 0 should hold; output is (c_dim,).
+      inequalities:  inequalities(x, u, theta, t) <= 0 should hold; output is (g_dim,).
       settings:      the solver settings.
 
     Returns:
-      Variables:   Variables object containing the solution for X, U, S, Y_dyn, Y_eq, Z.
+      Variables:   Variables object containing the solution for X, U, S, Y_dyn, Y_eq, Z, Theta.
       iterations:  the number of iterations it took to converge.
       no_errors:   whether no errors were encountered during the solve.
 
@@ -64,6 +66,7 @@ def solve(
         Y_dyn=vars_in.Y_dyn,
         Y_eq=vars_in.Y_eq,
         Z=jnp.maximum(vars_in.Z, 1e-3),
+        Theta=vars_in.Theta,
     )
 
     # Infer residual shapes from inputs to initialize η
@@ -89,7 +92,7 @@ def solve(
 
     if not settings.print_ls_logs:
         jax.debug.print(
-            "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(  # noqa: E501
+            "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(  # noqa: E501
                 "iteration",
                 "α",
                 "cost",
@@ -101,7 +104,8 @@ def solve(
                 "|ds|",
                 "|dy|",
                 "|dz|",
-                "η",
+                "|dθ|",
+                "avg(η)",
                 "µ",
                 "linsys_res",
             ),
@@ -170,6 +174,7 @@ def solve(
                     Y_dyn=deltas_inner.Y_dyn + refinement_deltas.Y_dyn,
                     Y_eq=deltas_inner.Y_eq + refinement_deltas.Y_eq,
                     Z=deltas_inner.Z + refinement_deltas.Z,
+                    Theta=deltas_inner.Theta + refinement_deltas.Theta,
                 ),
                 it + 1,
             )
@@ -239,20 +244,21 @@ def solve(
                 cU = vars.U + α * deltas.U
                 cU_pad = pad(cU)
                 cS = jnp.maximum(vars.S + α * deltas.S, (1.0 - settings.τ) * vars.S)
+                cTheta = vars.Theta + α * deltas.Theta
 
                 c_dyn0 = x0 - cX[0]
-                c_dyn = jax.vmap(dynamics)(cX[:-1], cU, T_range) - cX[1:]
-                c_eq = jax.vmap(equalities)(cX, cU_pad, Tp1_range)
+                c_dyn = vectorize(dynamics)(cX[:-1], cU, cTheta, T_range) - cX[1:]
+                c_eq = vectorize(equalities)(cX, cU_pad, cTheta, Tp1_range)
                 c = jnp.concatenate([c_dyn0, c_dyn.flatten(), c_eq.flatten()])
 
-                g = jax.vmap(inequalities)(cX, cU_pad, Tp1_range)
+                g = vectorize(inequalities)(cX, cU_pad, cTheta, Tp1_range)
                 gps = (g + cS).flatten()
                 dmerit = candidate_merit - baseline_merit
                 jax.debug.print(
                     "{:^10} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g}",  # noqa: E501
                     "",
                     α,
-                    jax.vmap(cost)(cX, cU_pad, Tp1_range).sum(),
+                    vectorize(cost)(cX, cU_pad, cTheta, Tp1_range).sum(),
                     jnp.linalg.norm(c),
                     jnp.linalg.norm(gps),
                     dmerit,
@@ -281,6 +287,7 @@ def solve(
                     residuals.Y_dyn.flatten(),
                     residuals.Y_eq.flatten(),
                     residuals.Z.flatten(),
+                    residuals.Theta.flatten(),
                 ]
             )
 
@@ -289,33 +296,15 @@ def solve(
             Tp1_range = jnp.arange(T + 1)
 
             c_dyn0 = x0 - vars.X[0]
-            c_dyn = jax.vmap(dynamics)(vars.X[:-1], vars.U, T_range) - vars.X[1:]
-            c_eq = jax.vmap(equalities)(vars.X, U_pad, Tp1_range)
+            c_dyn = (
+                vectorize(dynamics)(vars.X[:-1], vars.U, vars.Theta, T_range)
+                - vars.X[1:]
+            )
+            c_eq = vectorize(equalities)(vars.X, U_pad, vars.Theta, Tp1_range)
             c = jnp.concatenate([c_dyn0, c_dyn.flatten(), c_eq.flatten()])
 
-            g = jax.vmap(inequalities)(vars.X, U_pad, Tp1_range)
+            g = vectorize(inequalities)(vars.X, U_pad, vars.Theta, Tp1_range)
             gps = (g + vars.S).flatten()
-
-            if settings.print_ls_logs:
-                jax.debug.print(
-                    "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(  # noqa: E501
-                        "iteration",
-                        "α",
-                        "cost",
-                        "|c|",
-                        "|g+s|",
-                        "merit",
-                        "dmerit/dα",
-                        "|dx|+|du|",
-                        "|ds|",
-                        "|dy|",
-                        "|dz|",
-                        "avg(η)",
-                        "µ",
-                        "linsys_res",
-                    ),
-                    ordered=True,
-                )
 
             avg_η = jnp.mean(
                 jnp.concatenate(
@@ -327,11 +316,33 @@ def solve(
                 )
             )
 
+            if settings.print_ls_logs:
+                jax.debug.print(
+                    "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(  # noqa: E501
+                        "iteration",
+                        "α",
+                        "cost",
+                        "|c|",
+                        "|g+s|",
+                        "merit",
+                        "dmerit/dα",
+                        "|dx|+|du|",
+                        "|ds|",
+                        "|dy|",
+                        "|dz|",
+                        "|dθ|",
+                        "avg(η)",
+                        "µ",
+                        "linsys_res",
+                    ),
+                    ordered=True,
+                )
+
             jax.debug.print(
-                "{:^+10} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g}",  # noqa: E501
+                "{:^+10} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g}",  # noqa: E501
                 iteration,
                 α,
-                jax.vmap(cost)(vars.X, U_pad, Tp1_range).sum(),
+                vectorize(cost)(vars.X, U_pad, vars.Theta, Tp1_range).sum(),
                 jnp.linalg.norm(c),
                 jnp.linalg.norm(gps),
                 baseline_merit,
@@ -340,6 +351,7 @@ def solve(
                 jnp.linalg.norm(deltas.S),
                 jnp.linalg.norm(deltas.Y_dyn) + jnp.linalg.norm(deltas.Y_eq),
                 jnp.linalg.norm(deltas.Z),
+                jnp.linalg.norm(deltas.Theta),
                 avg_η,
                 params.µ,
                 jnp.linalg.norm(residual_vec),
@@ -353,6 +365,7 @@ def solve(
             Y_dyn=vars.Y_dyn + α * deltas.Y_dyn,
             Y_eq=vars.Y_eq + α * deltas.Y_eq,
             Z=jnp.maximum(vars.Z + α * deltas.Z, (1.0 - settings.τ) * vars.Z),
+            Theta=vars.Theta + α * deltas.Theta,
         )
 
         kkt_system_new = kkt_builder(
@@ -422,16 +435,16 @@ def solve(
             kkt_system,
             iteration,
         ) = inputs
+
         residual = jnp.concatenate(
             [
                 kkt_system.rhs.X.flatten(),
                 kkt_system.rhs.U.flatten(),
-                # Ensure we check sz - µe instead of z - µ / s.
-                # Alternatively, we could also just check sz.
                 (vars.S * kkt_system.rhs.S).flatten(),
                 kkt_system.rhs.Y_dyn.flatten(),
                 kkt_system.rhs.Y_eq.flatten(),
                 kkt_system.rhs.Z.flatten(),
+                kkt_system.rhs.Theta.flatten(),
             ]
         )
         not_converged = jnp.sum(jnp.square(residual)) > settings.residual_sq_threshold
