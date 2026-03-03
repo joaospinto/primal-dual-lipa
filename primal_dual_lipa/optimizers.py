@@ -92,7 +92,7 @@ def solve(
 
     if settings.print_logs and not settings.print_ls_logs:
         jax.debug.print(
-            "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(  # noqa: E501
+            "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(  # noqa: E501
                 "iteration",
                 "α",
                 "cost",
@@ -100,6 +100,8 @@ def solve(
                 "|g+s|",
                 "merit",
                 "dmerit/dα",
+                "dmerit/dαdX",
+                "dmerit/dαdS",
                 "|dx|+|du|",
                 "|ds|",
                 "|dy|",
@@ -192,9 +194,6 @@ def solve(
             return jnp.min(jnp.concatenate([alphas.flatten(), jnp.array([1.0])]))
 
         α_max_s = compute_alpha_max(vars.S, deltas.S, settings.τ)
-        α_max_z = compute_alpha_max(vars.Z, deltas.Z, settings.τ)
-        α_max = jnp.minimum(α_max_s, α_max_z)
-        α_max = jnp.minimum(α_max, 1.0)
 
         T_range = jnp.arange(T)
         Tp1_range = jnp.arange(T + 1)
@@ -212,9 +211,53 @@ def solve(
             deltas=deltas,
         )
 
+        dal_x = directional_augmented_lagrangian(
+            cost=cost,
+            dynamics=dynamics,
+            equalities=equalities,
+            inequalities=inequalities,
+            x0=x0,
+            params=params,
+            τ=settings.τ,
+            T=T,
+            vars=vars,
+            deltas=Variables(
+                X=deltas.X,
+                U=deltas.U,
+                S=jnp.zeros_like(deltas.S),
+                Y_dyn=jnp.zeros_like(deltas.Y_dyn),
+                Y_eq=jnp.zeros_like(deltas.Y_eq),
+                Z=jnp.zeros_like(deltas.Z),
+                Theta=jnp.zeros_like(deltas.Theta),
+            ),
+        )
+
+        dal_s = directional_augmented_lagrangian(
+            cost=cost,
+            dynamics=dynamics,
+            equalities=equalities,
+            inequalities=inequalities,
+            x0=x0,
+            params=params,
+            τ=settings.τ,
+            T=T,
+            vars=vars,
+            deltas=Variables(
+                X=jnp.zeros_like(deltas.X),
+                U=jnp.zeros_like(deltas.U),
+                S=deltas.S,
+                Y_dyn=jnp.zeros_like(deltas.Y_dyn),
+                Y_eq=jnp.zeros_like(deltas.Y_eq),
+                Z=jnp.zeros_like(deltas.Z),
+                Theta=jnp.zeros_like(deltas.Theta),
+            ),
+        )
+
         baseline_merit = dal(0.0)
 
         merit_grad = jax.grad(dal)(0.0)
+        merit_grad_x = jax.grad(dal_x)(0.0)
+        merit_grad_s = jax.grad(dal_s)(0.0)
 
         if settings.print_ls_logs:
             jax.debug.print(
@@ -270,7 +313,7 @@ def solve(
         α = jax.lax.while_loop(
             line_search_loop_continuation_criteria,
             line_search_loop_body,
-            α_max,
+            α_max_s,
         )
 
         if settings.print_logs:
@@ -318,7 +361,7 @@ def solve(
 
             if settings.print_ls_logs:
                 jax.debug.print(
-                    "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(  # noqa: E501
+                    "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(  # noqa: E501
                         "iteration",
                         "α",
                         "cost",
@@ -326,6 +369,8 @@ def solve(
                         "|g+s|",
                         "merit",
                         "dmerit/dα",
+                        "dmerit/dαdX",
+                        "dmerit/dαdS",
                         "|dx|+|du|",
                         "|ds|",
                         "|dy|",
@@ -339,7 +384,7 @@ def solve(
                 )
 
             jax.debug.print(
-                "{:^+10} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g}",  # noqa: E501
+                "{:^+10} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g}",  # noqa: E501
                 iteration,
                 α,
                 vectorize(cost)(vars.X, U_pad, vars.Theta, Tp1_range).sum(),
@@ -347,6 +392,8 @@ def solve(
                 jnp.linalg.norm(gps),
                 baseline_merit,
                 merit_grad,
+                merit_grad_x,
+                merit_grad_s,
                 jnp.linalg.norm(deltas.X) + jnp.linalg.norm(pad(deltas.U)),
                 jnp.linalg.norm(deltas.S),
                 jnp.linalg.norm(deltas.Y_dyn) + jnp.linalg.norm(deltas.Y_eq),
