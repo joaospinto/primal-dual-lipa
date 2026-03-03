@@ -90,7 +90,7 @@ def solve(
         params=params_current,
     )
 
-    if not settings.print_ls_logs:
+    if settings.print_logs and not settings.print_ls_logs:
         jax.debug.print(
             "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(  # noqa: E501
                 "iteration",
