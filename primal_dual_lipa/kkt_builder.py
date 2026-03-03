@@ -114,7 +114,7 @@ def kkt_builder(
     G_x, G_u, H_theta_z = inequalities_linearizer(vars.X, U_pad, vars.Theta, Tp1_range)
     G = jnp.concatenate([G_x, G_u], axis=-1)
 
-    w_inv = jnp.clip(vars.Z / vars.S, 1e-8, 1e8)
+    w_inv = jnp.clip(vars.Z / vars.S, 1e-8, 1e8) + params.μ
 
     H_theta_y_dyn_full = jnp.concatenate(
         [jnp.zeros_like(H_theta_y_dyn[0])[None, ...], H_theta_y_dyn], axis=0
