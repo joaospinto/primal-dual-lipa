@@ -471,7 +471,10 @@ def solve(
         µ_new = jnp.where(
             jnp.abs(residual).max() > settings.κ * params.µ,
             params.µ,
-            jnp.maximum(params.µ * settings.µ_update_factor, settings.µ_min),
+            jnp.maximum(
+                jnp.minimum(params.µ * settings.µ_update_factor, params.µ**1.5),
+                settings.µ_min,
+            ),
         )
         params_new = Parameters(
             µ=µ_new,
