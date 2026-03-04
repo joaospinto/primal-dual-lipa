@@ -171,9 +171,9 @@ class TestKKTSolves(unittest.TestCase):
                 )
 
                 if use_parallel_lqr:
-                    self.assertLess(jnp.linalg.norm(residual_vec), 1e-3)  # noqa: PT009
+                    self.assertLess(jnp.linalg.norm(residual_vec), 1e-12)  # noqa: PT009
                 else:
-                    self.assertLess(jnp.linalg.norm(residual_vec), 1e-9)  # noqa: PT009
+                    self.assertLess(jnp.linalg.norm(residual_vec), 1e-12)  # noqa: PT009
 
 
 if __name__ == "__main__":
