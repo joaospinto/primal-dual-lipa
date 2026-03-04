@@ -452,8 +452,27 @@ def solve(
             jnp.minimum(params.η_ineq * settings.η_update_factor, settings.η_max),
         )
 
+        residual = jnp.concatenate(
+            [
+                kkt_system.rhs.X.flatten(),
+                kkt_system.rhs.U.flatten(),
+                # Note: absolutely do NOT just use kkt_system.rhs.S.flatten() here.
+                # Using (vars.S * kkt_system.rhs.S).flatten() is also suboptimal,
+                # but would be a lot closer to being OK.
+                (vars.S * vars.Z).flatten(),
+                kkt_system.rhs.Y_dyn.flatten(),
+                kkt_system.rhs.Y_eq.flatten(),
+                kkt_system.rhs.Z.flatten(),
+                kkt_system.rhs.Theta.flatten(),
+            ]
+        )
+        µ_new = jnp.where(
+            jnp.abs(residual).max() > settings.κ * params.µ,
+            params.µ,
+            jnp.maximum(params.µ * settings.µ_update_factor, settings.µ_min),
+        )
         params_new = Parameters(
-            µ=jnp.maximum(params.µ * settings.µ_update_factor, settings.µ_min),
+            µ=µ_new,
             η_dyn=η_dyn_new,
             η_eq=η_eq_new,
             η_ineq=η_ineq_new,
@@ -487,7 +506,10 @@ def solve(
             [
                 kkt_system.rhs.X.flatten(),
                 kkt_system.rhs.U.flatten(),
-                (vars.S * kkt_system.rhs.S).flatten(),
+                # Note: absolutely do NOT just use kkt_system.rhs.S.flatten() here.
+                # Using (vars.S * kkt_system.rhs.S).flatten() is also suboptimal,
+                # but would be a lot closer to being OK.
+                (vars.S * vars.Z).flatten(),
                 kkt_system.rhs.Y_dyn.flatten(),
                 kkt_system.rhs.Y_eq.flatten(),
                 kkt_system.rhs.Z.flatten(),
