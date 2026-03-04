@@ -54,6 +54,9 @@ class Parameters:
     η_dyn: jnp.ndarray
     η_eq: jnp.ndarray
     η_ineq: jnp.ndarray
+    η_x: jnp.ndarray
+    η_u: jnp.ndarray
+    η_s: jnp.ndarray
 
 
 @jax.tree_util.register_dataclass

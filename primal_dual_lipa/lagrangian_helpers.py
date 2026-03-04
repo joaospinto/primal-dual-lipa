@@ -50,6 +50,7 @@ def build_total_augmented_lagrangian(  # noqa: ANN201
     equalities: Function,
     inequalities: Function,
     x0: jnp.ndarray,
+    current_vars: Variables,
     params: Parameters,
     T: jnp.int32,
 ):
@@ -86,12 +87,17 @@ def build_total_augmented_lagrangian(  # noqa: ANN201
         )
         c2 = 0.5 * jnp.sum(
             params.η_eq
-            * jnp.square(vectorize(equalities)(vars.X, U_pad, vars.Theta, Tp1_range))
+            * jnp.square(
+                vectorize(equalities)(vars.X, U_pad, vars.Theta, Tp1_range)
+                - (vars.Y_eq - current_vars.Y_eq) / params.η_eq
+            )
         )
         c3 = 0.5 * jnp.sum(
             params.η_ineq
             * jnp.square(
-                vectorize(inequalities)(vars.X, U_pad, vars.Theta, Tp1_range) + vars.S
+                vectorize(inequalities)(vars.X, U_pad, vars.Theta, Tp1_range)
+                + vars.S
+                - (vars.Z - current_vars.Z) / params.η_ineq
             )
         )
         c4 = 0.5 * jnp.sum(
@@ -99,10 +105,21 @@ def build_total_augmented_lagrangian(  # noqa: ANN201
             * jnp.square(
                 vectorize(dynamics)(vars.X[:-1], vars.U, vars.Theta, T_range)
                 - vars.X[1:]
+                - (vars.Y_dyn[1:] - current_vars.Y_dyn[1:]) / params.η_dyn[1:]
             )
         )
-        c5 = 0.5 * jnp.sum(params.η_dyn[0] * jnp.square(x0 - vars.X[0]))
-        return c1 + c2 + c3 + c4 + c5
+        c5 = 0.5 * jnp.sum(
+            params.η_dyn[0]
+            * jnp.square(
+                x0
+                - vars.X[0]
+                - (vars.Y_dyn[0] - current_vars.Y_dyn[0]) / params.η_dyn[0]
+            )
+        )
+        c6 = 0.5 * jnp.sum(jnp.square(vars.X - current_vars.X) / params.η_x)
+        c7 = 0.5 * jnp.sum(jnp.square(vars.U - current_vars.U) / params.η_u)
+        c8 = 0.5 * jnp.sum(jnp.square(vars.S - current_vars.S) / params.η_s)
+        return c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8
 
     return augmented_lagrangian
 
@@ -126,6 +143,7 @@ def directional_augmented_lagrangian(  # noqa: ANN201
         equalities=equalities,
         inequalities=inequalities,
         x0=x0,
+        current_vars=vars,
         params=params,
         T=T,
     )
@@ -136,9 +154,9 @@ def directional_augmented_lagrangian(  # noqa: ANN201
                 X=(vars.X + α * deltas.X),
                 U=(vars.U + α * deltas.U),
                 S=jnp.maximum(vars.S + α * deltas.S, (1.0 - τ) * vars.S),
-                Y_dyn=vars.Y_dyn,
-                Y_eq=vars.Y_eq,
-                Z=vars.Z,
+                Y_dyn=(vars.Y_dyn + α * deltas.Y_dyn),
+                Y_eq=(vars.Y_eq + α * deltas.Y_eq),
+                Z=jnp.maximum(vars.Z + α * deltas.Z, (1.0 - τ) * vars.Z),
                 Theta=(vars.Theta + α * deltas.Theta),
             )
         )

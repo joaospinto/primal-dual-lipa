@@ -110,6 +110,9 @@ class TestKKTSolves(unittest.TestCase):
             η_dyn=jnp.ones((T + 1, n)) * 10.0,
             η_eq=jnp.ones((T + 1, c_dim)) * 10.0,
             η_ineq=jnp.ones((T + 1, g_dim)) * 10.0,
+            η_x=jnp.ones((T + 1, n)) * 10.0,
+            η_u=jnp.ones((T, m)) * 10.0,
+            η_s=jnp.ones((T + 1, g_dim)) * 10.0,
             µ=0.1,
         )
 

@@ -74,6 +74,9 @@ def build_kkt_lhs(
 
     Q, R = regularize(Q=Q, R=R, M=M, psd_delta=1e-3)
 
+    Q = Q + 1.0 / params.η_x[..., None]
+    R = R + 1.0 / params.η_u[..., None]
+
     M_pad = jnp.concatenate([M, jnp.zeros_like(M[0])[None, ...]], axis=0)
 
     R_pad = jnp.concatenate([R, jnp.eye(R.shape[-1])[None, ...] * 1e-3], axis=0)
@@ -92,7 +95,7 @@ def build_kkt_lhs(
     G_x, G_u, H_theta_z = inequalities_linearizer(vars.X, U_pad, vars.Theta, Tp1_range)
     G = jnp.concatenate([G_x, G_u], axis=-1)
 
-    w_inv = jnp.clip(vars.Z / vars.S, 1e-8, 1e8) + params.μ
+    w_inv = jnp.clip(vars.Z / vars.S, 1e-8, 1e8) + 1.0 / params.η_s
 
     H_theta_y_dyn_full = jnp.concatenate(
         [jnp.zeros_like(H_theta_y_dyn[0])[None, ...], H_theta_y_dyn], axis=0

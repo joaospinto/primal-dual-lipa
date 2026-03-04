@@ -72,13 +72,19 @@ def solve(
     # Infer residual shapes from inputs to initialize η
     T = vars_current.X.shape[0] - 1
     n = vars_current.X.shape[1]
+    m = vars_current.U.shape[1]
     c_dim = vars_current.Y_eq.shape[-1]
     g_dim = vars_current.S.shape[-1]
 
     η_dyn = jnp.full((T + 1, n), settings.η0)
     η_eq = jnp.full((T + 1, c_dim), settings.η0)
     η_ineq = jnp.full((T + 1, g_dim), settings.η0)
-    params_current = Parameters(µ=settings.µ0, η_dyn=η_dyn, η_eq=η_eq, η_ineq=η_ineq)
+    η_x = jnp.full((T + 1, n), settings.η0)
+    η_u = jnp.full((T, m), settings.η0)
+    η_s = jnp.full((T + 1, g_dim), settings.η0)
+    params_current = Parameters(
+        µ=settings.µ0, η_dyn=η_dyn, η_eq=η_eq, η_ineq=η_ineq, η_x=η_x, η_u=η_u, η_s=η_s
+    )
 
     kkt_system = build_kkt(
         cost=cost,
@@ -196,6 +202,8 @@ def solve(
             return jnp.min(jnp.concatenate([alphas.flatten(), jnp.array([1.0])]))
 
         α_max_s = compute_alpha_max(vars.S, deltas.S, τ)
+        α_max_z = compute_alpha_max(vars.Z, deltas.Z, τ)
+        α_max = jnp.minimum(α_max_s, α_max_z)
 
         T_range = jnp.arange(T)
         Tp1_range = jnp.arange(T + 1)
@@ -315,7 +323,7 @@ def solve(
         α = jax.lax.while_loop(
             line_search_loop_continuation_criteria,
             line_search_loop_body,
-            α_max_s,
+            α_max,
         )
 
         if settings.print_logs:
@@ -357,6 +365,9 @@ def solve(
                         params.η_dyn.flatten(),
                         params.η_eq.flatten(),
                         params.η_ineq.flatten(),
+                        params.η_x.flatten(),
+                        params.η_u.flatten(),
+                        params.η_s.flatten(),
                     ]
                 )
             )
@@ -454,6 +465,33 @@ def solve(
             jnp.minimum(params.η_ineq * settings.η_update_factor, settings.η_max),
         )
 
+        improved_x = jnp.linalg.norm(
+            new_residual.X
+        ) < settings.η_improvement_threshold * jnp.linalg.norm(kkt_system.rhs.X)
+        η_x_new = jnp.where(
+            improved_x,
+            params.η_x,
+            jnp.minimum(params.η_x * settings.η_update_factor, settings.η_max),
+        )
+
+        improved_u = jnp.linalg.norm(
+            new_residual.U
+        ) < settings.η_improvement_threshold * jnp.linalg.norm(kkt_system.rhs.U)
+        η_u_new = jnp.where(
+            improved_u,
+            params.η_u,
+            jnp.minimum(params.η_u * settings.η_update_factor, settings.η_max),
+        )
+
+        improved_s = jnp.linalg.norm(
+            new_residual.S
+        ) < settings.η_improvement_threshold * jnp.linalg.norm(kkt_system.rhs.S)
+        η_s_new = jnp.where(
+            improved_s,
+            params.η_s,
+            jnp.minimum(params.η_s * settings.η_update_factor, settings.η_max),
+        )
+
         residual = jnp.concatenate(
             [
                 new_residual.X.flatten(),
@@ -482,6 +520,9 @@ def solve(
             η_dyn=η_dyn_new,
             η_eq=η_eq_new,
             η_ineq=η_ineq_new,
+            η_x=η_x_new,
+            η_u=η_u_new,
+            η_s=η_s_new,
         )
 
         kkt_system_new = build_kkt(
