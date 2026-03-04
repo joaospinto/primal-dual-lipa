@@ -32,7 +32,7 @@ class SolverSettings:
     µ0: jnp.double = 1e-3
     µ_update_factor: jnp.double = 0.8
     µ_min: jnp.double = 1e-16
-    τ: jnp.double = 0.995
+    τ_min: jnp.double = 0.995
     κ: jnp.double = 10.0
     armijo_factor: jnp.double = 1e-4
     num_iterative_refinement_steps: jnp.int32 = 0

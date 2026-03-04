@@ -187,13 +187,15 @@ def solve(
             (deltas, 0),
         )
 
+        τ = jnp.maximum(settings.τ_min, 1.0 - params.µ)
+
         def compute_alpha_max(v, dv, τ):
             mask = dv < 0
             safe_dv = jnp.where(mask, dv, -1.0)
             alphas = jnp.where(mask, -(τ * v) / safe_dv, 1.0)
             return jnp.min(jnp.concatenate([alphas.flatten(), jnp.array([1.0])]))
 
-        α_max_s = compute_alpha_max(vars.S, deltas.S, settings.τ)
+        α_max_s = compute_alpha_max(vars.S, deltas.S, τ)
 
         T_range = jnp.arange(T)
         Tp1_range = jnp.arange(T + 1)
@@ -205,7 +207,7 @@ def solve(
             inequalities=inequalities,
             x0=x0,
             params=params,
-            τ=settings.τ,
+            τ=τ,
             T=T,
             vars=vars,
             deltas=deltas,
@@ -218,7 +220,7 @@ def solve(
             inequalities=inequalities,
             x0=x0,
             params=params,
-            τ=settings.τ,
+            τ=τ,
             T=T,
             vars=vars,
             deltas=Variables(
@@ -239,7 +241,7 @@ def solve(
             inequalities=inequalities,
             x0=x0,
             params=params,
-            τ=settings.τ,
+            τ=τ,
             T=T,
             vars=vars,
             deltas=Variables(
@@ -286,7 +288,7 @@ def solve(
                 cX = vars.X + α * deltas.X
                 cU = vars.U + α * deltas.U
                 cU_pad = pad(cU)
-                cS = jnp.maximum(vars.S + α * deltas.S, (1.0 - settings.τ) * vars.S)
+                cS = jnp.maximum(vars.S + α * deltas.S, (1.0 - τ) * vars.S)
                 cTheta = vars.Theta + α * deltas.Theta
 
                 c_dyn0 = x0 - cX[0]
@@ -408,10 +410,10 @@ def solve(
         vars_updated = Variables(
             X=vars.X + α * deltas.X,
             U=vars.U + α * deltas.U,
-            S=jnp.maximum(vars.S + α * deltas.S, (1.0 - settings.τ) * vars.S),
+            S=jnp.maximum(vars.S + α * deltas.S, (1.0 - τ) * vars.S),
             Y_dyn=vars.Y_dyn + α * deltas.Y_dyn,
             Y_eq=vars.Y_eq + α * deltas.Y_eq,
-            Z=jnp.maximum(vars.Z + α * deltas.Z, (1.0 - settings.τ) * vars.Z),
+            Z=jnp.maximum(vars.Z + α * deltas.Z, (1.0 - τ) * vars.Z),
             Theta=vars.Theta + α * deltas.Theta,
         )
 
