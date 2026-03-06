@@ -280,9 +280,9 @@ def solve(
 
         def line_search_loop_continuation_criteria(α: jnp.double) -> jnp.bool:
             candidate_merit = dal(α)
-            armijo_condition_not_met = (
+            armijo_condition_met = (
                 candidate_merit - baseline_merit
-                > α * settings.armijo_factor * merit_grad
+                <= α * settings.armijo_factor * merit_grad
             )
             if settings.print_ls_logs:
                 cX = vars.X + α * deltas.X
@@ -310,7 +310,9 @@ def solve(
                     dmerit / α,
                     ordered=True,
                 )
-            return jnp.logical_and(α > settings.α_min, armijo_condition_not_met)
+            return jnp.logical_and(
+                α > settings.α_min, jnp.logical_not(armijo_condition_met)
+            )
 
         α = jax.lax.while_loop(
             line_search_loop_continuation_criteria,
@@ -532,9 +534,11 @@ def solve(
                 kkt_system.rhs.Theta.flatten(),
             ]
         )
-        not_converged = jnp.sum(jnp.square(residual)) > settings.residual_sq_threshold
-        no_iteration_limit = iteration < settings.max_iterations
-        return jnp.logical_and(not_converged, no_iteration_limit)
+        converged = jnp.sum(jnp.square(residual)) <= settings.residual_sq_threshold
+        hit_iteration_limit = iteration >= settings.max_iterations
+        return jnp.logical_and(
+            jnp.logical_not(converged), jnp.logical_not(hit_iteration_limit)
+        )
 
     (
         vars_out,
