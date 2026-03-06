@@ -5,7 +5,7 @@ from functools import partial
 import jax
 from jax import numpy as jnp
 
-from primal_dual_lipa.kkt_builder import kkt_builder
+from primal_dual_lipa.kkt_builder import build_kkt, build_kkt_rhs
 from primal_dual_lipa.kkt_helpers import (
     compute_kkt_residual,
     factor_kkt,
@@ -80,7 +80,7 @@ def solve(
     η_ineq = jnp.full((T + 1, g_dim), settings.η0)
     params_current = Parameters(µ=settings.µ0, η_dyn=η_dyn, η_eq=η_eq, η_ineq=η_ineq)
 
-    kkt_system = kkt_builder(
+    kkt_system = build_kkt(
         cost=cost,
         dynamics=dynamics,
         equalities=equalities,
@@ -407,7 +407,7 @@ def solve(
                 ordered=True,
             )
 
-        vars_updated = Variables(
+        updated_vars = Variables(
             X=vars.X + α * deltas.X,
             U=vars.U + α * deltas.U,
             S=jnp.maximum(vars.S + α * deltas.S, (1.0 - τ) * vars.S),
@@ -417,18 +417,18 @@ def solve(
             Theta=vars.Theta + α * deltas.Theta,
         )
 
-        kkt_system_new = kkt_builder(
+        new_residual = build_kkt_rhs(
             cost=cost,
             dynamics=dynamics,
             equalities=equalities,
             inequalities=inequalities,
             x0=x0,
-            vars=vars_updated,
+            vars=updated_vars,
             params=params,
         )
 
         improved_dyn = jnp.abs(
-            kkt_system_new.rhs.Y_dyn
+            new_residual.Y_dyn
         ) < settings.η_improvement_threshold * jnp.abs(kkt_system.rhs.Y_dyn)
         η_dyn_new = jnp.where(
             improved_dyn,
@@ -437,7 +437,7 @@ def solve(
         )
 
         improved_eq = jnp.abs(
-            kkt_system_new.rhs.Y_eq
+            new_residual.Y_eq
         ) < settings.η_improvement_threshold * jnp.abs(kkt_system.rhs.Y_eq)
         η_eq_new = jnp.where(
             improved_eq,
@@ -446,7 +446,7 @@ def solve(
         )
 
         improved_ineq = jnp.abs(
-            kkt_system_new.rhs.Z
+            new_residual.Z
         ) < settings.η_improvement_threshold * jnp.abs(kkt_system.rhs.Z)
         η_ineq_new = jnp.where(
             improved_ineq,
@@ -456,16 +456,16 @@ def solve(
 
         residual = jnp.concatenate(
             [
-                kkt_system.rhs.X.flatten(),
-                kkt_system.rhs.U.flatten(),
-                # Note: absolutely do NOT just use kkt_system.rhs.S.flatten() here.
-                # Using (vars.S * kkt_system.rhs.S).flatten() is also suboptimal,
+                new_residual.X.flatten(),
+                new_residual.U.flatten(),
+                # Note: absolutely do NOT just use new_residual.S.flatten() here.
+                # Using (vars.S * new_residual.S).flatten() is also suboptimal,
                 # but would be a lot closer to being OK.
                 (vars.S * vars.Z).flatten(),
-                kkt_system.rhs.Y_dyn.flatten(),
-                kkt_system.rhs.Y_eq.flatten(),
-                kkt_system.rhs.Z.flatten(),
-                kkt_system.rhs.Theta.flatten(),
+                new_residual.Y_dyn.flatten(),
+                new_residual.Y_eq.flatten(),
+                new_residual.Z.flatten(),
+                new_residual.Theta.flatten(),
             ]
         )
         µ_new = jnp.where(
@@ -476,18 +476,29 @@ def solve(
                 settings.µ_min,
             ),
         )
-        params_new = Parameters(
+
+        updated_params = Parameters(
             µ=µ_new,
             η_dyn=η_dyn_new,
             η_eq=η_eq_new,
             η_ineq=η_ineq_new,
         )
 
+        kkt_system_new = build_kkt(
+            cost=cost,
+            dynamics=dynamics,
+            equalities=equalities,
+            inequalities=inequalities,
+            x0=x0,
+            vars=updated_vars,
+            params=updated_params,
+        )
+
         iteration += 1
 
         return (
-            vars_updated,
-            params_new,
+            updated_vars,
+            updated_params,
             kkt_system_new,
             iteration,
         )
