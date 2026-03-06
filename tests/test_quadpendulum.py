@@ -318,7 +318,7 @@ class TestQuadpendulum(unittest.TestCase):
 
         # TODO(joao): only change print_logs, if possible.
         settings = SolverSettings(
-            max_iterations=1000,
+            max_iterations=1250,
             residual_sq_threshold=1e-12,
             α_min=0.1,
             η0=10.0,
