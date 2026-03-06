@@ -136,10 +136,10 @@ class TestCartpole(unittest.TestCase):
         U = jnp.zeros([T, m])
         # X = rollout(dynamics, U, x0)
         X = jnp.linspace(start=x0, stop=goal, num=T + 1)
-        S = jnp.ones([T + 1, g_dim])
+        S = jnp.zeros([T + 1, g_dim])
         Y_dyn = jnp.zeros_like(X)
         Y_eq = jnp.zeros([T + 1, c_dim])
-        Z = jnp.ones([T + 1, g_dim])
+        Z = jnp.zeros([T + 1, g_dim])
 
         vars_in = Variables(
             X=X, U=U, S=S, Y_dyn=Y_dyn, Y_eq=Y_eq, Z=Z, Theta=jnp.empty(0)

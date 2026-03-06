@@ -307,10 +307,10 @@ class TestQuadpendulum(unittest.TestCase):
 
         X = jnp.tile(x0, (T + 1, 1))
         U = jnp.tile(u_hover, (T, 1))
-        S = -vectorize(inequalities_closure)(X, pad(U), jnp.empty(0), jnp.arange(T + 1))
+        S = jnp.zeros((T + 1, g_dim))
         Y_dyn = jnp.zeros_like(X)
         Y_eq = jnp.zeros([T + 1, c_dim])
-        Z = jnp.ones([T + 1, g_dim])
+        Z = jnp.zeros([T + 1, g_dim])
 
         vars_in = Variables(
             X=X, U=U, S=S, Y_dyn=Y_dyn, Y_eq=Y_eq, Z=Z, Theta=jnp.empty(0)

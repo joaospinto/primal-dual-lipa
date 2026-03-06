@@ -62,10 +62,10 @@ def solve(
     vars_current = Variables(
         X=vars_in.X,
         U=vars_in.U,
-        S=jnp.maximum(vars_in.S, 1e-3),
+        S=jnp.maximum(vars_in.S, jnp.sqrt(settings.µ0)),
         Y_dyn=vars_in.Y_dyn,
         Y_eq=vars_in.Y_eq,
-        Z=jnp.maximum(vars_in.Z, 1e-3),
+        Z=jnp.maximum(vars_in.Z, jnp.sqrt(settings.µ0)),
         Theta=vars_in.Theta,
     )
 
