@@ -5,7 +5,9 @@ from collections.abc import Callable
 from functools import partial
 
 import jax
+import matplotlib.pyplot as plt
 from jax import numpy as jnp
+from matplotlib import animation
 
 from primal_dual_lipa.integrators import euler
 from primal_dual_lipa.lagrangian_helpers import pad
@@ -35,7 +37,7 @@ def get_s1_wrapper(s1_ind: tuple[int, ...]) -> Callable[[jnp.ndarray], jnp.ndarr
 
 n = 8
 m = 2
-T = 160
+T = 200
 
 
 Mass = 0.486
@@ -47,6 +49,10 @@ J = 0.00383
 fric = 0.01
 
 u_hover = 0.5 * (Mass + mass) * grav * jnp.ones((m,))
+
+r_joint = 0.05 * l
+r_tip = 0.1 * l
+r_t = 0.3 * l
 
 
 # State: q = (p_x, p_y, theta, phi, velocities)  # noqa: ERA001
@@ -134,20 +140,127 @@ dt = 0.025
 dynamics = euler(ode, dt)
 
 
-def obs_constraint(
-    q: jnp.ndarray, obs: list[tuple[jnp.ndarray, jnp.double]]
-) -> jnp.ndarray:
-    """Define the obstacle constraints."""
+# Define Quadrotor Geometry (relative coordinates)
+quad = (
+    jnp.array([[-l, 0.0], [l, 0.0]]),
+    jnp.array([[-l, 0.0], [-l, 0.3 * l]]),
+    jnp.array([[l, 0.0], [l, 0.3 * l]]),
+    jnp.array([[-1.3 * l, 0.3 * l], [-0.7 * l, 0.3 * l]]),
+    jnp.array([[0.7 * l, 0.3 * l], [1.3 * l, 0.3 * l]]),
+)
 
-    def get_closest_point(
-        endp: tuple[jnp.ndarray, jnp.ndarray], p_o: jnp.ndarray
-    ) -> jnp.ndarray:
-        """Get closest point between point and straight-line between endpoints."""
-        x, y = endp
-        t_ = jnp.vdot(p_o - x, y - x) / jnp.vdot(y - x, y - x)
-        t_min = jnp.minimum(1.0, jnp.maximum(0.0, t_))
-        return x + t_min * (y - x)
 
+def render_quad(ax, x, y, theta, phi, col=None, show_ell=0.05):
+    """Plots the quadrotor and its pendulum pole on a given axis."""
+    pos = jnp.array([x, y])
+    R = jnp.array([[jnp.cos(theta), -jnp.sin(theta)], [jnp.sin(theta), jnp.cos(theta)]])
+
+    # Update quad components based on rotation and position
+    quad_comps = tuple(v @ R.T + pos for v in quad)
+
+    for comp in quad_comps:
+        ax.plot(
+            comp[:, 0],
+            comp[:, 1],
+            color=col if col is not None else "k",
+            linewidth=2,
+        )
+
+    # Circumscribing sphere for quad body
+    pos_c = pos + R @ jnp.array([0.0, 0.15 * l])
+    ell = plt.Circle(pos_c, l, alpha=show_ell, color="k")
+    ax.add_patch(ell)
+
+    # Pendulum Pole (line segment only)
+    pole_tip = pos + jnp.array([L * jnp.sin(phi), -L * jnp.cos(phi)])
+    ax.plot(
+        [pos[0], pole_tip[0]],
+        [pos[1], pole_tip[1]],
+        "-",
+        color=col if col is not None else "b",
+    )
+
+    # Pole End Circles
+    joint_circ = plt.Circle(
+        pos, r_joint, color=col if col is not None else "b", zorder=10
+    )
+    tip_circ = plt.Circle(
+        pole_tip, r_tip, color=col if col is not None else "b", zorder=10
+    )
+    ax.add_patch(joint_circ)
+    ax.add_patch(tip_circ)
+
+
+def gen_timelapse(ax, X, obs, world_range, step0, stepr):
+    """
+    Generates a timelapse plot of the trajectory.
+    X: Trajectory array of shape (T, state_dim)
+    step0: initial step size for snapshots
+    stepr: step-size increase/decrease ratio
+    """
+    # Plot Obstacles
+    for ob in obs:
+        ax.add_patch(plt.Circle(ob[0], ob[1], color="k", alpha=0.5))
+
+    # Plot Trajectory Trace (Quad and Pole tip)
+    X_pole = jax.vmap(
+        lambda x, y, phi: jnp.array([x + L * jnp.sin(phi), y - L * jnp.cos(phi)])
+    )(X[:, 0], X[:, 1], X[:, 3])
+
+    ax.plot(X[:, 0], X[:, 1], "k--", linewidth=2)  # Quad center path
+    ax.plot(X_pole[:, 0], X_pole[:, 1], "b--", linewidth=1)  # Pole tip path
+
+    ax.set_xlim([world_range[0][0], world_range[1][0]])
+    ax.set_ylim([world_range[0][1], world_range[1][1]])
+    ax.set_aspect("equal")
+
+    # Render snapshots
+    tt = 0
+    it = 0
+    while tt < X.shape[0]:
+        col = "g" if tt == 0 else None
+        render_quad(ax, X[tt, 0], X[tt, 1], X[tt, 2], X[tt, 3], col, 0.03)
+        tt += int(step0 * (stepr**it))
+        it += 1
+
+    # Render final state in red
+    render_quad(ax, X[-1, 0], X[-1, 1], X[-1, 2], X[-1, 3], "r", 0.03)
+
+
+def gen_movie(fig, ax, X, obs, world_range, dt):
+    """Generates an animation of the quadrotor following the trajectory."""
+
+    def render(tt):
+        ax.clear()
+        # Render Quad at current time step
+        render_quad(ax, X[tt, 0], X[tt, 1], X[tt, 2], X[tt, 3])
+
+        # Render Obstacles
+        for ob in obs:
+            ax.add_patch(plt.Circle(ob[0], ob[1], color="k", alpha=0.3))
+
+        # Render a short trailing trace of the trajectory
+        tt_s = int(max(tt - round(0.5 / dt), 0))
+        ax.plot(X[tt_s:tt, 0], X[tt_s:tt, 1], "r-", linewidth=2)
+
+        ax.set_xlim([world_range[0][0], world_range[1][0]])
+        ax.set_ylim([world_range[0][1], world_range[1][1]])
+        ax.set_aspect("equal", adjustable="box")
+        return [ax]
+
+    anim = animation.FuncAnimation(
+        fig,
+        render,
+        frames=range(0, X.shape[0]),
+        interval=1000 * dt,
+        repeat_delay=3000,
+    )
+
+    return anim
+
+
+def get_system_geometry(q: jnp.ndarray):
+    """Returns the geometry of the quadrotor system."""
     pos = q[:2]
     theta_quad = q[2]
     phi = q[-1]
@@ -159,21 +272,52 @@ def obs_constraint(
         ]
     )
     pos_c = pos + R @ jnp.array([0.0, 0.15 * l])
-    pole = (pos, pos + jnp.array([L * jnp.sin(phi), -L * jnp.cos(phi)]))
+    pos_lt = pos + R @ jnp.array([-l, 0.3 * l])
+    pos_rt = pos + R @ jnp.array([l, 0.3 * l])
 
-    def avoid_obs(
-        pos_c: jnp.ndarray,
-        pole: tuple[jnp.ndarray, jnp.ndarray],
-        ob: tuple[jnp.ndarray, jnp.double],
-    ) -> jnp.ndarray:
-        delta_body = pos_c - ob[0]
-        body_dist_sq = jnp.vdot(delta_body, delta_body) - (ob[1] + l) ** 2
-        pole_p = get_closest_point(pole, ob[0])
-        delta_pole = pole_p - ob[0]
-        pole_dist_sq = jnp.vdot(delta_pole, delta_pole) - (ob[1] ** 2)
-        return -jnp.array([body_dist_sq, pole_dist_sq])
+    pole_tip = pos + jnp.array([L * jnp.sin(phi), -L * jnp.cos(phi)])
 
-    return jnp.concatenate([avoid_obs(pos_c, pole, ob) for ob in obs])
+    # Circles: (center, radius)
+    circles = (
+        (pos, r_joint),
+        (pos_c, l),
+        (pos_lt, r_t),
+        (pos_rt, r_t),
+        (pole_tip, r_tip),
+    )
+    pole = (pos, pole_tip)
+    return circles, pole
+
+
+def get_closest_point(
+    endp: tuple[jnp.ndarray, jnp.ndarray], p_o: jnp.ndarray
+) -> jnp.ndarray:
+    """Get closest point between point and straight-line between endpoints."""
+    x_p, y_p = endp
+    t_ = jnp.vdot(p_o - x_p, y_p - x_p) / jnp.vdot(y_p - x_p, y_p - x_p)
+    t_min = jnp.minimum(1.0, jnp.maximum(0.0, t_))
+    return x_p + t_min * (y_p - x_p)
+
+
+def obs_constraint(
+    q: jnp.ndarray, obs: list[tuple[jnp.ndarray, jnp.double]]
+) -> jnp.ndarray:
+    """Define the obstacle constraints."""
+    circles, pole = get_system_geometry(q)
+
+    def avoid_obs(ob: tuple[jnp.ndarray, jnp.double]) -> jnp.ndarray:
+        ob_pos, ob_r = ob
+        cons = []
+        for c, r in circles:
+            delta = c - ob_pos
+            cons.append(-(jnp.vdot(delta, delta) - (ob_r + r) ** 2))
+
+        pole_p = get_closest_point(pole, ob_pos)
+        delta_pole = pole_p - ob_pos
+        cons.append(-(jnp.vdot(delta_pole, delta_pole) - ob_r**2))
+        return jnp.array(cons)
+
+    return jnp.concatenate([avoid_obs(ob) for ob in obs])
 
 
 @jax.jit
@@ -203,6 +347,23 @@ def cost(
 
 
 @jax.jit
+def equalities(
+    x: jnp.ndarray,
+    u: jnp.ndarray,
+    theta: jnp.ndarray,
+    t: jnp.int32,
+    T: jnp.int32,
+    goal: jnp.ndarray,
+) -> jnp.ndarray:
+    """Define the equality constraints."""
+    del u, theta
+    # State wrapping for the goal comparison
+    s1_ind = (2, 3)
+    state_wrap = get_s1_wrapper(s1_ind)
+    return jnp.where(t == T, state_wrap(x - goal), jnp.zeros_like(x))
+
+
+@jax.jit
 def state_constraint(
     x: jnp.ndarray,
     theta: jnp.ndarray,
@@ -214,8 +375,17 @@ def state_constraint(
     """Define the state constraints."""
     del theta, t
     theta_cons = jnp.array((x[2] - theta_lim, -x[2] - theta_lim))
+
+    circles, _ = get_system_geometry(x[:4])
+
+    # World range constraints for all circles
+    world_cons = []
+    for c, r in circles:
+        world_cons.append(-c + world_range[0] + r)
+        world_cons.append(c - world_range[1] + r)
+    world_cons = jnp.concatenate(world_cons)
+
     avoid_cons = obs_constraint(x[:4], obs=obs)
-    world_cons = jnp.concatenate((-x[:2] + world_range[0], x[:2] - world_range[1]))
 
     return jnp.concatenate(
         (
@@ -293,6 +463,8 @@ class TestQuadpendulum(unittest.TestCase):
 
         cost_closure = partial(cost, goal=goal, weights=weights, Q_T=Q_T)
 
+        equalities_closure = partial(equalities, T=T, goal=goal)
+
         inequalities_closure = partial(
             inequalities,
             T=T,
@@ -302,7 +474,7 @@ class TestQuadpendulum(unittest.TestCase):
             control_bounds=control_bounds,
         )
 
-        c_dim = 0
+        c_dim = equalities_closure(jnp.zeros(n), jnp.zeros(m), jnp.empty(0), 0).size
         g_dim = inequalities_closure(jnp.zeros(n), jnp.zeros(m), jnp.empty(0), 0).size
 
         X = jnp.tile(x0, (T + 1, 1))
@@ -318,7 +490,7 @@ class TestQuadpendulum(unittest.TestCase):
 
         # TODO(joao): only change print_logs, if possible.
         settings = SolverSettings(
-            residual_sq_threshold=1e-12,
+            residual_sq_threshold=1e-10,
             α_min=0.5,
             η0=10.0,
             η_max=1e9,
@@ -337,6 +509,7 @@ class TestQuadpendulum(unittest.TestCase):
             x0=x0,
             cost=cost_closure,
             dynamics=dynamics,
+            equalities=equalities_closure,
             inequalities=inequalities_closure,
             settings=settings,
         )
@@ -347,6 +520,18 @@ class TestQuadpendulum(unittest.TestCase):
             ).sum(),
             9.4,
         )  # noqa: PT009
+
+        # Visualization
+        print("Generating visualization assets...")  # noqa: T201
+        fig, ax = plt.subplots(figsize=(10, 5))
+        gen_timelapse(ax, vars_out.X, obs, world_range, 10, 1.0)
+        fig.savefig("quadpend_timelapse.png")
+        print("Saved quadpend_timelapse.png")  # noqa: T201
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        anim = gen_movie(fig, ax, vars_out.X, obs, world_range, dt)
+        anim.save("quadpend_movie.mp4", writer="ffmpeg")
+        print("Saved quadpend_movie.mp4")  # noqa: T201
 
 
 if __name__ == "__main__":
