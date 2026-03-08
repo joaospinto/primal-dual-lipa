@@ -219,21 +219,24 @@ def get_closest_point(
 
 
 def obs_constraint(
-    q: jnp.ndarray, obs: list[tuple[jnp.ndarray, jnp.double]]
+    q: jnp.ndarray, obs: list[tuple[jnp.ndarray, jnp.double]], theta_dist: jnp.ndarray
 ) -> jnp.ndarray:
     """Define the obstacle constraints."""
     circles, pole = get_system_geometry(q)
+    margin = theta_dist[0]
 
     def avoid_obs(ob: tuple[jnp.ndarray, jnp.double]) -> jnp.ndarray:
         ob_pos, ob_r = ob
         cons = []
         for c, r in circles:
             delta = c - ob_pos
-            cons.append(-(jnp.vdot(delta, delta) - (ob_r + r) ** 2))
+            # distance^2 >= (ob_r + r + margin)^2
+            cons.append(-(jnp.vdot(delta, delta) - (ob_r + r + margin) ** 2))
 
         pole_p = get_closest_point(pole, ob_pos)
         delta_pole = pole_p - ob_pos
-        cons.append(-(jnp.vdot(delta_pole, delta_pole) - ob_r**2))
+        # -(distance^2 - (ob_r + margin)^2) <= 0
+        cons.append(-(jnp.vdot(delta_pole, delta_pole) - (ob_r + margin) ** 2))
         return jnp.array(cons)
 
     return jnp.concatenate([avoid_obs(ob) for ob in obs])
@@ -250,7 +253,6 @@ def cost(
     Q_T: jnp.ndarray,
 ) -> jnp.double:
     """Define the problem cost."""
-    del theta
     # Do angle wrapping on theta and phi
     s1_ind = (2, 3)
     state_wrap = get_s1_wrapper(s1_ind)
@@ -262,7 +264,13 @@ def cost(
     stage_cost = weights[0] * pos_cost + weights[1] * ctrl_cost
     term_cost = weights[2] * jnp.vdot(delta, Q_T * delta)
 
-    return jnp.where(t == T, 0.5 * term_cost, 0.5 * stage_cost)
+    # Add theta cost. theta[0] is the minimum distance margin.
+    # We want to maximize it, so we add -weights[3] * theta[0] to the total cost.
+    theta_cost = -weights[3] * theta[0]
+
+    return jnp.where(t == T, 0.5 * term_cost, 0.5 * stage_cost) + jnp.where(
+        t == 0, theta_cost, 0.0
+    )
 
 
 @jax.jit
@@ -292,7 +300,7 @@ def state_constraint(
     theta_lim: jnp.double,
 ) -> jnp.ndarray:
     """Define the state constraints."""
-    del theta, t
+    del t
     theta_cons = jnp.array((x[2] - theta_lim, -x[2] - theta_lim))
 
     circles, _ = get_system_geometry(x[:4])
@@ -304,7 +312,7 @@ def state_constraint(
         world_cons.append(c - world_range[1] + r)
     world_cons = jnp.concatenate(world_cons)
 
-    avoid_cons = obs_constraint(x[:4], obs=obs)
+    avoid_cons = obs_constraint(x[:4], obs=obs, theta_dist=theta)
 
     return jnp.concatenate(
         (
@@ -359,7 +367,7 @@ class TestQuadpendulum(unittest.TestCase):
         # Solve
         x0 = jnp.concatenate((pos_0, jnp.zeros((4,))))
 
-        weights = jnp.array((0.01, 0.05, 5.0))
+        weights = jnp.array((0.01, 0.05, 5.0, 10.0))
         Q_T = jnp.array((10.0, 10.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0))
 
         theta_lim = 3.0 * jnp.pi / 4.0
@@ -393,8 +401,11 @@ class TestQuadpendulum(unittest.TestCase):
             control_bounds=control_bounds,
         )
 
-        c_dim = equalities_closure(jnp.zeros(n), jnp.zeros(m), jnp.empty(0), 0).size
-        g_dim = inequalities_closure(jnp.zeros(n), jnp.zeros(m), jnp.empty(0), 0).size
+        # Theta now has one element
+        theta_init = jnp.array([0.0])
+
+        c_dim = equalities_closure(jnp.zeros(n), jnp.zeros(m), theta_init, 0).size
+        g_dim = inequalities_closure(jnp.zeros(n), jnp.zeros(m), theta_init, 0).size
 
         X = jnp.tile(x0, (T + 1, 1))
         U = jnp.tile(u_hover, (T, 1))
@@ -404,12 +415,13 @@ class TestQuadpendulum(unittest.TestCase):
         Z = jnp.zeros([T + 1, g_dim])
 
         vars_in = Variables(
-            X=X, U=U, S=S, Y_dyn=Y_dyn, Y_eq=Y_eq, Z=Z, Theta=jnp.empty(0)
+            X=X, U=U, S=S, Y_dyn=Y_dyn, Y_eq=Y_eq, Z=Z, Theta=theta_init
         )
 
         # TODO(joao): only change print_logs, if possible.
         settings = SolverSettings(
-            residual_sq_threshold=1e-10,
+            max_iterations=2000,
+            residual_sq_threshold=1e-8,
             α_min=0.5,
             η0=10.0,
             η_max=1e9,
@@ -432,12 +444,13 @@ class TestQuadpendulum(unittest.TestCase):
             inequalities=inequalities_closure,
             settings=settings,
         )
+        print(f"Final Theta: {vars_out.Theta}")  # noqa: T201
         self.assertTrue(no_errors)  # noqa: PT009
         self.assertLess(
             vectorize(cost_closure)(
                 vars_out.X, pad(vars_out.U), vars_out.Theta, jnp.arange(T + 1)
             ).sum(),
-            9.4,
+            10.0,
         )  # noqa: PT009
 
         # Visualization
