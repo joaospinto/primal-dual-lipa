@@ -9,13 +9,49 @@ import jax
 from jax import numpy as jnp
 from jax import scipy as jsp
 
+import matplotlib.pyplot as plt
 from primal_dual_lipa.integrators import euler
 from primal_dual_lipa.lagrangian_helpers import pad
 from primal_dual_lipa.optimizers import SolverSettings, solve
 from primal_dual_lipa.types import Variables
 from primal_dual_lipa.vectorization_helpers import vectorize
+from tests.helpers import gen_movie, gen_timelapse
 
 jax.config.update("jax_enable_x64", True)  # noqa: FBT003
+
+
+def render_cartpole(ax, state, params, col=None, alpha=1.0):
+    """Plots the cartpole on a given axis."""
+    _mc, _mp, l = params
+    x = state[0]
+    theta = state[1]
+
+    # Cart
+    cart_w = 0.5
+    cart_h = 0.2
+    cart_rect = plt.Rectangle(
+        (x - cart_w / 2, -cart_h / 2),
+        cart_w,
+        cart_h,
+        color=col if col else "k",
+        alpha=alpha,
+    )
+    ax.add_patch(cart_rect)
+
+    # Pole
+    pole_x = x + l * jnp.sin(theta)
+    pole_y = -l * jnp.cos(theta)
+    ax.plot(
+        [x, pole_x],
+        [0, pole_y],
+        color=col if col else "b",
+        alpha=alpha,
+        linewidth=2,
+    )
+
+    # Joint and Tip
+    ax.plot(x, 0, "o", color=col if col else "k", alpha=alpha)
+    ax.plot(pole_x, pole_y, "o", color=col if col else "b", alpha=alpha)
 
 
 @jax.jit
@@ -124,7 +160,8 @@ class TestCartpole(unittest.TestCase):
         dynamics_params = jnp.array([10.0, 1.0, 0.5])
         dynamics = partial(cartpole, params=dynamics_params)
 
-        dynamics = euler(dynamics, dt=0.1)
+        dt = 0.1
+        dynamics = euler(dynamics, dt=dt)
 
         goal = jnp.array([0, jnp.pi, 0, 0])
         cost = partial(goal_cost, goal=goal, T=T)
@@ -173,6 +210,49 @@ class TestCartpole(unittest.TestCase):
             ).sum(),
             67.0,
         )  # noqa: PT009
+
+        # Visualization
+        print("Generating visualization assets...")  # noqa: T201
+        world_range = (jnp.array([-1.0, -0.6]), jnp.array([1.0, 0.6]))
+        render_fn = partial(render_cartpole, params=dynamics_params)
+
+        def get_traces(X):
+            _mc, _mp, l = dynamics_params
+            cart_center = jax.vmap(lambda x: jnp.array([x, 0.0]))(X[:, 0])
+            pole_tip = jax.vmap(
+                lambda x, theta: jnp.array(
+                    [x + l * jnp.sin(theta), -l * jnp.cos(theta)]
+                )
+            )(X[:, 0], X[:, 1])
+            return [cart_center, pole_tip]
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        gen_timelapse(
+            ax,
+            vars_out.X,
+            render_fn,
+            world_range,
+            5 * 5,
+            1.0,
+            get_traces_fn=get_traces,
+            interpolation_factor=5,
+        )
+        fig.savefig("cartpole_timelapse.png")
+        print("Saved cartpole_timelapse.png")  # noqa: T201
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        anim = gen_movie(
+            fig,
+            ax,
+            vars_out.X,
+            render_fn,
+            world_range,
+            dt,
+            get_traces_fn=get_traces,
+            interpolation_factor=5,
+        )
+        anim.save("cartpole_movie.mp4", writer="ffmpeg")
+        print("Saved cartpole_movie.mp4")  # noqa: T201
 
 
 if __name__ == "__main__":

@@ -14,25 +14,9 @@ from primal_dual_lipa.lagrangian_helpers import pad
 from primal_dual_lipa.optimizers import SolverSettings, solve
 from primal_dual_lipa.types import Variables
 from primal_dual_lipa.vectorization_helpers import vectorize
+from tests.helpers import gen_movie, gen_timelapse, get_s1_wrapper
 
 jax.config.update("jax_enable_x64", True)  # noqa: FBT003
-
-
-def _wrap_to_pi(x: jnp.ndarray) -> jnp.ndarray:
-    """Wrap x to lie within [-pi, pi]."""
-    # From https://github.com/google/trajax/blob/main/trajax/experimental/sqp/util.py.
-    return (x + jnp.pi) % (2 * jnp.pi) - jnp.pi
-
-
-def get_s1_wrapper(s1_ind: tuple[int, ...]) -> Callable[[jnp.ndarray], jnp.ndarray]:
-    """Return a function for wrapping S1 components of state to [-pi, pi]."""
-    # From https://github.com/google/trajax/blob/main/trajax/experimental/sqp/util.py.
-    idxs = jnp.array(s1_ind)
-
-    def state_wrapper(x: jnp.ndarray) -> jnp.ndarray:
-        return x.at[idxs].set(_wrap_to_pi(x[idxs]))
-
-    return jax.jit(state_wrapper)
 
 
 n = 8
@@ -150,8 +134,9 @@ quad = (
 )
 
 
-def render_quad(ax, x, y, theta, phi, col=None, show_ell=0.05):
+def render_quad(ax, state, col=None, alpha=1.0):
     """Plots the quadrotor and its pendulum pole on a given axis."""
+    x, y, theta, phi = state[:4]
     pos = jnp.array([x, y])
     R = jnp.array([[jnp.cos(theta), -jnp.sin(theta)], [jnp.sin(theta), jnp.cos(theta)]])
 
@@ -164,11 +149,12 @@ def render_quad(ax, x, y, theta, phi, col=None, show_ell=0.05):
             comp[:, 1],
             color=col if col is not None else "k",
             linewidth=2,
+            alpha=alpha,
         )
 
-    # Circumscribing sphere for quad body
+    # Circumscribing sphere for quad body - should ALWAYS be faint
     pos_c = pos + R @ jnp.array([0.0, 0.15 * l])
-    ell = plt.Circle(pos_c, l, alpha=show_ell, color="k")
+    ell = plt.Circle(pos_c, l, alpha=0.05 * alpha, color="k")
     ax.add_patch(ell)
 
     # Pendulum Pole (line segment only)
@@ -178,85 +164,18 @@ def render_quad(ax, x, y, theta, phi, col=None, show_ell=0.05):
         [pos[1], pole_tip[1]],
         "-",
         color=col if col is not None else "b",
+        alpha=alpha,
     )
 
     # Pole End Circles
     joint_circ = plt.Circle(
-        pos, r_joint, color=col if col is not None else "b", zorder=10
+        pos, r_joint, color=col if col is not None else "b", zorder=10, alpha=alpha
     )
     tip_circ = plt.Circle(
-        pole_tip, r_tip, color=col if col is not None else "b", zorder=10
+        pole_tip, r_tip, color=col if col is not None else "b", zorder=10, alpha=alpha
     )
     ax.add_patch(joint_circ)
     ax.add_patch(tip_circ)
-
-
-def gen_timelapse(ax, X, obs, world_range, step0, stepr):
-    """
-    Generates a timelapse plot of the trajectory.
-    X: Trajectory array of shape (T, state_dim)
-    step0: initial step size for snapshots
-    stepr: step-size increase/decrease ratio
-    """
-    # Plot Obstacles
-    for ob in obs:
-        ax.add_patch(plt.Circle(ob[0], ob[1], color="k", alpha=0.5))
-
-    # Plot Trajectory Trace (Quad and Pole tip)
-    X_pole = jax.vmap(
-        lambda x, y, phi: jnp.array([x + L * jnp.sin(phi), y - L * jnp.cos(phi)])
-    )(X[:, 0], X[:, 1], X[:, 3])
-
-    ax.plot(X[:, 0], X[:, 1], "k--", linewidth=2)  # Quad center path
-    ax.plot(X_pole[:, 0], X_pole[:, 1], "b--", linewidth=1)  # Pole tip path
-
-    ax.set_xlim([world_range[0][0], world_range[1][0]])
-    ax.set_ylim([world_range[0][1], world_range[1][1]])
-    ax.set_aspect("equal")
-
-    # Render snapshots
-    tt = 0
-    it = 0
-    while tt < X.shape[0]:
-        col = "g" if tt == 0 else None
-        render_quad(ax, X[tt, 0], X[tt, 1], X[tt, 2], X[tt, 3], col, 0.03)
-        tt += int(step0 * (stepr**it))
-        it += 1
-
-    # Render final state in red
-    render_quad(ax, X[-1, 0], X[-1, 1], X[-1, 2], X[-1, 3], "r", 0.03)
-
-
-def gen_movie(fig, ax, X, obs, world_range, dt):
-    """Generates an animation of the quadrotor following the trajectory."""
-
-    def render(tt):
-        ax.clear()
-        # Render Quad at current time step
-        render_quad(ax, X[tt, 0], X[tt, 1], X[tt, 2], X[tt, 3])
-
-        # Render Obstacles
-        for ob in obs:
-            ax.add_patch(plt.Circle(ob[0], ob[1], color="k", alpha=0.3))
-
-        # Render a short trailing trace of the trajectory
-        tt_s = int(max(tt - round(0.5 / dt), 0))
-        ax.plot(X[tt_s:tt, 0], X[tt_s:tt, 1], "r-", linewidth=2)
-
-        ax.set_xlim([world_range[0][0], world_range[1][0]])
-        ax.set_ylim([world_range[0][1], world_range[1][1]])
-        ax.set_aspect("equal", adjustable="box")
-        return [ax]
-
-    anim = animation.FuncAnimation(
-        fig,
-        render,
-        frames=range(0, X.shape[0]),
-        interval=1000 * dt,
-        repeat_delay=3000,
-    )
-
-    return anim
 
 
 def get_system_geometry(q: jnp.ndarray):
@@ -523,13 +442,41 @@ class TestQuadpendulum(unittest.TestCase):
 
         # Visualization
         print("Generating visualization assets...")  # noqa: T201
+
+        def get_traces(X):
+            quad_center = X[:, :2]
+            pole_tip = jax.vmap(
+                lambda x, y, phi: jnp.array(
+                    [x + L * jnp.sin(phi), y - L * jnp.cos(phi)]
+                )
+            )(X[:, 0], X[:, 1], X[:, 3])
+            return [quad_center, pole_tip]
+
         fig, ax = plt.subplots(figsize=(10, 5))
-        gen_timelapse(ax, vars_out.X, obs, world_range, 10, 1.0)
+        gen_timelapse(
+            ax,
+            vars_out.X,
+            render_quad,
+            world_range,
+            10,
+            1.0,
+            obs=obs,
+            get_traces_fn=get_traces,
+        )
         fig.savefig("quadpend_timelapse.png")
         print("Saved quadpend_timelapse.png")  # noqa: T201
 
         fig, ax = plt.subplots(figsize=(10, 5))
-        anim = gen_movie(fig, ax, vars_out.X, obs, world_range, dt)
+        anim = gen_movie(
+            fig,
+            ax,
+            vars_out.X,
+            render_quad,
+            world_range,
+            dt,
+            obs=obs,
+            get_traces_fn=get_traces,
+        )
         anim.save("quadpend_movie.mp4", writer="ffmpeg")
         print("Saved quadpend_movie.mp4")  # noqa: T201
 
