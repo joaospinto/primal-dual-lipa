@@ -6,22 +6,22 @@ from jax import numpy as jnp
 from matplotlib import animation
 
 
-def _wrap_to_pi(x: jnp.ndarray) -> jnp.ndarray:
+def _wrap_to_pi(x: jax.Array) -> jax.Array:
     """Wrap x to lie within [-pi, pi]."""
     return (x + jnp.pi) % (2 * jnp.pi) - jnp.pi
 
 
-def get_s1_wrapper(s1_ind: tuple[int, ...]) -> Callable[[jnp.ndarray], jnp.ndarray]:
+def get_s1_wrapper(s1_ind: tuple[int, ...]) -> Callable[[jax.Array], jax.Array]:
     """Return a function for wrapping S1 components of state to [-pi, pi]."""
     idxs = jnp.array(s1_ind)
 
-    def state_wrapper(x: jnp.ndarray) -> jnp.ndarray:
+    def state_wrapper(x: jax.Array) -> jax.Array:
         return x.at[idxs].set(_wrap_to_pi(x[idxs]))
 
     return jax.jit(state_wrapper)
 
 
-def interpolate_trajectory(X: jnp.ndarray, factor: int) -> jnp.ndarray:
+def interpolate_trajectory(X: jax.Array, factor: int) -> jax.Array:
     """Interpolate trajectory X by a given factor."""
     if factor <= 1:
         return X
@@ -38,13 +38,13 @@ def interpolate_trajectory(X: jnp.ndarray, factor: int) -> jnp.ndarray:
 
 def gen_timelapse(
     ax: plt.Axes,
-    X: jnp.ndarray,
+    X: jax.Array,
     render_fn: Callable,
-    world_range: tuple[jnp.ndarray, jnp.ndarray],
+    world_range: tuple[jax.Array, jax.Array],
     step0: int,
     stepr: float,
     obs: list | None = None,
-    get_traces_fn: Callable[[jnp.ndarray], list[jnp.ndarray]] | None = None,
+    get_traces_fn: Callable[[jax.Array], list[jax.Array]] | None = None,
     interpolation_factor: int = 1,
 ) -> None:
     """Generates a timelapse plot of the trajectory."""
@@ -79,12 +79,12 @@ def gen_timelapse(
 def gen_movie(
     fig: plt.Figure,
     ax: plt.Axes,
-    X: jnp.ndarray,
+    X: jax.Array,
     render_fn: Callable,
-    world_range: tuple[jnp.ndarray, jnp.ndarray],
+    world_range: tuple[jax.Array, jax.Array],
     dt: float,
     obs: list | None = None,
-    get_traces_fn: Callable[[jnp.ndarray], list[jnp.ndarray]] | None = None,
+    get_traces_fn: Callable[[jax.Array], list[jax.Array]] | None = None,
     interpolation_factor: int = 1,
 ) -> animation.FuncAnimation:
     """Generates an animation of the system following the trajectory."""

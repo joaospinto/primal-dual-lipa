@@ -44,7 +44,7 @@ r_t = 0.3 * l
 # phi: rotation angle of pendulum, w.r.t. vertical (NOTE: not a relative angle)
 
 
-def get_mass_matrix(q: jnp.ndarray) -> jnp.ndarray:
+def get_mass_matrix(q: jax.Array) -> jax.Array:
     """Return the mass matrix M_q."""
     phi = q[-1]
     return jnp.array(
@@ -62,7 +62,7 @@ def get_mass_matrix(q: jnp.ndarray) -> jnp.ndarray:
     )
 
 
-def get_mass_inv(q: jnp.ndarray) -> jnp.ndarray:
+def get_mass_inv(q: jax.Array) -> jax.Array:
     """Return the inverse mass matrix M_inv."""
     phi = q[-1]
     a = Mass + mass
@@ -81,21 +81,19 @@ def get_mass_inv(q: jnp.ndarray) -> jnp.ndarray:
 
 
 @jax.jit
-def ode(
-    x: jnp.ndarray, u: jnp.ndarray, theta: jnp.ndarray, t: jnp.double
-) -> jnp.ndarray:
+def ode(x: jax.Array, u: jax.Array, theta: jax.Array, t: jnp.double) -> jax.Array:
     """Provide the dynamics ODE."""
     del theta
 
-    def kinetic(q: jnp.ndarray, q_dot: jnp.ndarray) -> jnp.ndarray:
+    def kinetic(q: jax.Array, q_dot: jax.Array) -> jax.Array:
         """Define the kinetic energy."""
         return 0.5 * jnp.vdot(q_dot, get_mass_matrix(q) @ q_dot)
 
-    def potential(q: jnp.ndarray) -> jnp.ndarray:
+    def potential(q: jax.Array) -> jax.Array:
         """Define the potential energy."""
         return Mass * grav * q[1] + mass * grav * (q[1] - L * jnp.cos(q[-1]))
 
-    def lag(q: jnp.ndarray, q_dot: jnp.ndarray) -> jnp.ndarray:
+    def lag(q: jax.Array, q_dot: jax.Array) -> jax.Array:
         """Define the physical Lagrangian."""
         return kinetic(q, q_dot) - potential(q)
 
@@ -178,7 +176,7 @@ def render_quad(ax, state, col=None, alpha=1.0):
     ax.add_patch(tip_circ)
 
 
-def get_system_geometry(q: jnp.ndarray):
+def get_system_geometry(q: jax.Array):
     """Returns the geometry of the quadrotor system."""
     pos = q[:2]
     theta_quad = q[2]
@@ -208,9 +206,7 @@ def get_system_geometry(q: jnp.ndarray):
     return circles, pole
 
 
-def get_closest_point(
-    endp: tuple[jnp.ndarray, jnp.ndarray], p_o: jnp.ndarray
-) -> jnp.ndarray:
+def get_closest_point(endp: tuple[jax.Array, jax.Array], p_o: jax.Array) -> jax.Array:
     """Get closest point between point and straight-line between endpoints."""
     x_p, y_p = endp
     t_ = jnp.vdot(p_o - x_p, y_p - x_p) / jnp.vdot(y_p - x_p, y_p - x_p)
@@ -219,13 +215,13 @@ def get_closest_point(
 
 
 def obs_constraint(
-    q: jnp.ndarray, obs: list[tuple[jnp.ndarray, jnp.double]], theta_dist: jnp.ndarray
-) -> jnp.ndarray:
+    q: jax.Array, obs: list[tuple[jax.Array, jnp.double]], theta_dist: jax.Array
+) -> jax.Array:
     """Define the obstacle constraints."""
     circles, pole = get_system_geometry(q)
     margin = theta_dist[0]
 
-    def avoid_obs(ob: tuple[jnp.ndarray, jnp.double]) -> jnp.ndarray:
+    def avoid_obs(ob: tuple[jax.Array, jnp.double]) -> jax.Array:
         ob_pos, ob_r = ob
         cons = []
         for c, r in circles:
@@ -244,13 +240,13 @@ def obs_constraint(
 
 @jax.jit
 def cost(
-    x: jnp.ndarray,
-    u: jnp.ndarray,
-    theta: jnp.ndarray,
+    x: jax.Array,
+    u: jax.Array,
+    theta: jax.Array,
     t: jnp.int32,
-    goal: jnp.ndarray,
-    weights: jnp.ndarray,
-    Q_T: jnp.ndarray,
+    goal: jax.Array,
+    weights: jax.Array,
+    Q_T: jax.Array,
 ) -> jnp.double:
     """Define the problem cost."""
     # Do angle wrapping on theta and phi
@@ -275,13 +271,13 @@ def cost(
 
 @jax.jit
 def equalities(
-    x: jnp.ndarray,
-    u: jnp.ndarray,
-    theta: jnp.ndarray,
+    x: jax.Array,
+    u: jax.Array,
+    theta: jax.Array,
     t: jnp.int32,
     T: jnp.int32,
-    goal: jnp.ndarray,
-) -> jnp.ndarray:
+    goal: jax.Array,
+) -> jax.Array:
     """Define the equality constraints."""
     del u, theta
     # State wrapping for the goal comparison
@@ -292,13 +288,13 @@ def equalities(
 
 @jax.jit
 def state_constraint(
-    x: jnp.ndarray,
-    theta: jnp.ndarray,
+    x: jax.Array,
+    theta: jax.Array,
     t: jnp.int32,
-    obs: list[tuple[jnp.ndarray, jnp.double]],
-    world_range: tuple[jnp.ndarray, jnp.ndarray],
+    obs: list[tuple[jax.Array, jnp.double]],
+    world_range: tuple[jax.Array, jax.Array],
     theta_lim: jnp.double,
-) -> jnp.ndarray:
+) -> jax.Array:
     """Define the state constraints."""
     del t
     theta_cons = jnp.array((x[2] - theta_lim, -x[2] - theta_lim))
@@ -325,16 +321,16 @@ def state_constraint(
 
 @jax.jit
 def inequalities(
-    x: jnp.ndarray,
-    u: jnp.ndarray,
-    theta: jnp.ndarray,
+    x: jax.Array,
+    u: jax.Array,
+    theta: jax.Array,
     t: jnp.int32,
     T: jnp.int32,
-    obs: list[tuple[jnp.ndarray, jnp.double]],
-    world_range: tuple[jnp.ndarray, jnp.ndarray],
+    obs: list[tuple[jax.Array, jnp.double]],
+    world_range: tuple[jax.Array, jax.Array],
     theta_lim: jnp.double,
-    control_bounds: tuple[jnp.ndarray, jnp.ndarray],
-) -> jnp.ndarray:
+    control_bounds: tuple[jax.Array, jax.Array],
+) -> jax.Array:
     """Define the inequality constraints."""
     control_delta_lb = jnp.where(t == T, -jnp.ones_like(u), control_bounds[0] - u)
     control_delta_ub = jnp.where(t == T, -jnp.ones_like(u), u - control_bounds[1])

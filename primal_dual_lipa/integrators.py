@@ -15,8 +15,8 @@ def midpoint(dynamics: Function, dt: jnp.double) -> Function:
     """Apply midpoint transcription."""
 
     def integrator(
-        x: jnp.ndarray, u: jnp.ndarray, theta: jnp.ndarray, t: jnp.double
-    ) -> jnp.ndarray:
+        x: jax.Array, u: jax.Array, theta: jax.Array, t: jnp.double
+    ) -> jax.Array:
         dt2 = 0.5 * dt
         k1 = dynamics(x, u, theta, t)
         k2 = dynamics(x + dt2 * k1, u, theta, t + dt2)
@@ -29,8 +29,8 @@ def rk4(dynamics: Function, dt: jnp.double) -> Function:
     """Apply Runge-Kutta 4 transcription."""
 
     def integrator(
-        x: jnp.ndarray, u: jnp.ndarray, theta: jnp.ndarray, t: jnp.double
-    ) -> jnp.ndarray:
+        x: jax.Array, u: jax.Array, theta: jax.Array, t: jnp.double
+    ) -> jax.Array:
         dt2 = 0.5 * dt
         k1 = dynamics(x, u, theta, t)
         k2 = dynamics(x + dt2 * k1, u, theta, t + dt2)
@@ -42,13 +42,13 @@ def rk4(dynamics: Function, dt: jnp.double) -> Function:
 
 
 def rollout(
-    dynamics: Function, U: jnp.ndarray, x0: jnp.ndarray, theta: jnp.ndarray
-) -> jnp.ndarray:
+    dynamics: Function, U: jax.Array, x0: jax.Array, theta: jax.Array
+) -> jax.Array:
     """Rollout the dynamics for a control sequence."""
 
     def dynamics_for_scan(
-        x: jnp.ndarray, ut: tuple[jnp.ndarray, jnp.int32]
-    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        x: jax.Array, ut: tuple[jax.Array, jnp.int32]
+    ) -> tuple[jax.Array, jax.Array]:
         u, t = ut
         x_next = dynamics(x, u, theta, t)
         return x_next, x_next

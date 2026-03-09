@@ -35,7 +35,7 @@ from primal_dual_lipa.vectorization_helpers import vectorize
 )
 def solve(
     vars_in: Variables,
-    x0: jnp.ndarray,
+    x0: jax.Array,
     cost: CostFunction,
     dynamics: Function,
     settings: SolverSettings,

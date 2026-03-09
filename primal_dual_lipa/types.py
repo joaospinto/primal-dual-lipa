@@ -41,8 +41,8 @@ class SolverSettings:
     print_ls_logs: jnp.bool = field(default=False, metadata={"static": True})
 
 
-Function = Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.int32], jnp.ndarray]
-CostFunction = Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.int32], jnp.double]
+Function = Callable[[jax.Array, jax.Array, jax.Array, jnp.int32], jax.Array]
+CostFunction = Callable[[jax.Array, jax.Array, jax.Array, jnp.int32], jnp.double]
 
 
 @jax.tree_util.register_dataclass
@@ -51,9 +51,9 @@ class Parameters:
     """Encapsulate µ and η variables."""
 
     µ: jnp.double
-    η_dyn: jnp.ndarray
-    η_eq: jnp.ndarray
-    η_ineq: jnp.ndarray
+    η_dyn: jax.Array
+    η_eq: jax.Array
+    η_ineq: jax.Array
 
 
 @jax.tree_util.register_dataclass
@@ -61,18 +61,18 @@ class Parameters:
 class KKTFactorizationInputs:
     """Inputs to the KKT factorization."""
 
-    P: jnp.ndarray
-    D: jnp.ndarray
-    E: jnp.ndarray
-    G: jnp.ndarray
-    w_inv: jnp.ndarray
+    P: jax.Array
+    D: jax.Array
+    E: jax.Array
+    G: jax.Array
+    w_inv: jax.Array
     params: Parameters
-    H_theta_theta: jnp.ndarray
-    H_theta_X: jnp.ndarray
-    H_theta_U: jnp.ndarray
-    H_theta_y_dyn: jnp.ndarray
-    H_theta_y_eq: jnp.ndarray
-    H_theta_z: jnp.ndarray
+    H_theta_theta: jax.Array
+    H_theta_X: jax.Array
+    H_theta_U: jax.Array
+    H_theta_y_dyn: jax.Array
+    H_theta_y_eq: jax.Array
+    H_theta_z: jax.Array
 
 
 @jax.tree_util.register_dataclass
@@ -82,13 +82,13 @@ class KKTFactorizationOutputs:
 
     lqr_inputs: LQRFactorizationInputs
     lqr_outputs: LQRSequentialFactorizationOutputs | LQRParallelFactorizationOutputs
-    schur_complement: jnp.ndarray
-    B_inv_C_X: jnp.ndarray
-    B_inv_C_U: jnp.ndarray
-    B_inv_C_S: jnp.ndarray
-    B_inv_C_Y_dyn: jnp.ndarray
-    B_inv_C_Y_eq: jnp.ndarray
-    B_inv_C_Z: jnp.ndarray
+    schur_complement: jax.Array
+    B_inv_C_X: jax.Array
+    B_inv_C_U: jax.Array
+    B_inv_C_S: jax.Array
+    B_inv_C_Y_dyn: jax.Array
+    B_inv_C_Y_eq: jax.Array
+    B_inv_C_Z: jax.Array
 
 
 @jax.tree_util.register_dataclass
@@ -96,13 +96,13 @@ class KKTFactorizationOutputs:
 class Variables:
     """Generic variables container."""
 
-    X: jnp.ndarray
-    U: jnp.ndarray
-    S: jnp.ndarray
-    Y_dyn: jnp.ndarray
-    Y_eq: jnp.ndarray
-    Z: jnp.ndarray
-    Theta: jnp.ndarray
+    X: jax.Array
+    U: jax.Array
+    S: jax.Array
+    Y_dyn: jax.Array
+    Y_eq: jax.Array
+    Z: jax.Array
+    Theta: jax.Array
 
 
 @jax.tree_util.register_dataclass

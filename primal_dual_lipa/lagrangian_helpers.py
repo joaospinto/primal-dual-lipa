@@ -7,7 +7,7 @@ from primal_dual_lipa.types import CostFunction, Function, Parameters, Variables
 from primal_dual_lipa.vectorization_helpers import vectorize
 
 
-def pad(A: jnp.ndarray) -> jnp.ndarray:
+def pad(A: jax.Array) -> jax.Array:
     """Pad with zeros along the first axis by an extra element."""
     return jnp.pad(A, [[0, 1], [0, 0]])
 
@@ -17,21 +17,21 @@ def build_lagrangian(  # noqa: ANN201
     dynamics: Function,
     equalities: Function,
     inequalities: Function,
-    x0: jnp.ndarray,
+    x0: jax.Array,
     µ: jnp.double,
 ):
     """Return a function to evaluate the associated Lagrangian."""
 
     def lagrangian(
-        X: jnp.ndarray,
-        U: jnp.ndarray,
-        Theta: jnp.ndarray,
+        X: jax.Array,
+        U: jax.Array,
+        Theta: jax.Array,
         t: jnp.int32,
-        S: jnp.ndarray,
-        next_Y_dyn: jnp.ndarray,
-        Y_dyn: jnp.ndarray,
-        Y_eq: jnp.ndarray,
-        Z: jnp.ndarray,
+        S: jax.Array,
+        next_Y_dyn: jax.Array,
+        Y_dyn: jax.Array,
+        Y_eq: jax.Array,
+        Z: jax.Array,
     ) -> jnp.double:
         c1 = cost(X, U, Theta, t)
         c2 = jnp.dot(next_Y_dyn, dynamics(X, U, Theta, t))
@@ -49,7 +49,7 @@ def build_total_augmented_lagrangian(  # noqa: ANN201
     dynamics: Function,
     equalities: Function,
     inequalities: Function,
-    x0: jnp.ndarray,
+    x0: jax.Array,
     params: Parameters,
     T: jnp.int32,
 ):
@@ -112,7 +112,7 @@ def directional_augmented_lagrangian(  # noqa: ANN201
     dynamics: Function,
     equalities: Function,
     inequalities: Function,
-    x0: jnp.ndarray,
+    x0: jax.Array,
     params: Parameters,
     τ: jnp.double,
     T: jnp.int32,

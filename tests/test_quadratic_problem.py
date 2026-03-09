@@ -19,8 +19,8 @@ class TestLqrSolve(unittest.TestCase):
 
         @jax.jit
         def dynamics(
-            x: jnp.ndarray, u: jnp.ndarray, theta: jnp.ndarray, t: jnp.int32
-        ) -> jnp.ndarray:
+            x: jax.Array, u: jax.Array, theta: jax.Array, t: jnp.int32
+        ) -> jax.Array:
             del theta
             A = 6 * t * jnp.ones([2, 2]) + jnp.arange(4).reshape([2, 2])
             B = 6 * t * jnp.ones([2, 1]) + jnp.arange(4, 6).reshape([2, 1])
@@ -29,7 +29,7 @@ class TestLqrSolve(unittest.TestCase):
 
         @jax.jit
         def cost(
-            x: jnp.ndarray, u: jnp.ndarray, theta: jnp.ndarray, t: jnp.int32
+            x: jax.Array, u: jax.Array, theta: jax.Array, t: jnp.int32
         ) -> jnp.double:
             del theta
             Q = (t + 1) * jnp.diag(jnp.arange(1, 3))

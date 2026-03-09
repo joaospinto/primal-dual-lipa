@@ -56,12 +56,12 @@ def render_cartpole(ax, state, params, col=None, alpha=1.0):
 
 @jax.jit
 def cartpole(
-    state: jnp.ndarray,
-    action: jnp.ndarray,
-    theta: jnp.ndarray,
+    state: jax.Array,
+    action: jax.Array,
+    theta: jax.Array,
     timestep: jnp.double,
-    params: jnp.ndarray,
-) -> jnp.ndarray:
+    params: jax.Array,
+) -> jax.Array:
     """Classic cartpole system.
 
     Args:
@@ -102,9 +102,9 @@ def cartpole(
 
 @jax.jit
 def goal_cost(
-    x: jnp.ndarray,
-    u: jnp.ndarray,
-    theta: jnp.ndarray,
+    x: jax.Array,
+    u: jax.Array,
+    theta: jax.Array,
     t: jnp.int32,
     goal: jnp.int32,
     T: jnp.int32,
@@ -119,13 +119,13 @@ def goal_cost(
 
 @jax.jit
 def goal_equality(
-    x: jnp.ndarray,
-    _u: jnp.ndarray,
-    theta: jnp.ndarray,
+    x: jax.Array,
+    _u: jax.Array,
+    theta: jax.Array,
     t: jnp.int32,
     goal: jnp.int32,
     T: jnp.int32,
-) -> jnp.ndarray:
+) -> jax.Array:
     """Define the final state constraint."""
     del theta  # Unused
     return jnp.where(t == T, x - goal, jnp.zeros_like(x))
@@ -133,12 +133,12 @@ def goal_equality(
 
 @jax.jit
 def inequalities(
-    _x: jnp.ndarray,
-    u: jnp.ndarray,
-    theta: jnp.ndarray,
+    _x: jax.Array,
+    u: jax.Array,
+    theta: jax.Array,
     t: jnp.int32,
     T: jnp.int32,
-) -> jnp.ndarray:
+) -> jax.Array:
     """Define the control bounds."""
     del theta  # Unused
     return jnp.where(t == T, -jnp.ones(2), jnp.array([u[0] - 5.0, -5.0 - u[0]]))

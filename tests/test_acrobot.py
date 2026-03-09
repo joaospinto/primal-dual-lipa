@@ -19,12 +19,12 @@ jax.config.update("jax_enable_x64", True)  # noqa: FBT003
 
 @jax.jit
 def acrobot(
-    x: jnp.ndarray,
-    u: jnp.ndarray,
-    theta: jnp.ndarray,
+    x: jax.Array,
+    u: jax.Array,
+    theta: jax.Array,
     t: jnp.double,
-    params: jnp.ndarray,
-) -> jnp.ndarray:
+    params: jax.Array,
+) -> jax.Array:
     """Classic Acrobot system.
 
     Note this implementation emulates the OpenAI gym implementation of
@@ -69,12 +69,12 @@ def acrobot(
 
 @jax.jit
 def goal_cost(
-    x: jnp.ndarray,
-    u: jnp.ndarray,
-    theta: jnp.ndarray,
+    x: jax.Array,
+    u: jax.Array,
+    theta: jax.Array,
     t: jnp.int32,
-    params: jnp.ndarray,
-    goal: jnp.ndarray,
+    params: jax.Array,
+    goal: jax.Array,
     T: jnp.int32,
 ) -> jnp.double:
     """Define the cost function."""

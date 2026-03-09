@@ -61,14 +61,14 @@ def block_schur_psd_projection(M, dims, eps):
 
 @jax.jit
 def regularize(
-    Q: jnp.ndarray,
-    R: jnp.ndarray,
-    M: jnp.ndarray,
+    Q: jax.Array,
+    R: jax.Array,
+    M: jax.Array,
     psd_delta: jnp.double,
-    H_theta_theta_per_stage: jnp.ndarray,
-    H_x_theta: jnp.ndarray,
-    H_u_theta: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    H_theta_theta_per_stage: jax.Array,
+    H_x_theta: jax.Array,
+    H_u_theta: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Regularizes the KKT Hessian blocks including parameters.
 
     This method ensures that the joint Hessian (wrt states, controls, and parameters)
@@ -137,7 +137,7 @@ def build_kkt_lhs(
     dynamics: Function,
     equalities: Function,
     inequalities: Function,
-    x0: jnp.ndarray,
+    x0: jax.Array,
     vars: Variables,
     params: Parameters,
 ) -> KKTFactorizationInputs:
@@ -240,7 +240,7 @@ def build_kkt_rhs(
     dynamics: Function,
     equalities: Function,
     inequalities: Function,
-    x0: jnp.ndarray,
+    x0: jax.Array,
     vars: Variables,
     params: Parameters,
 ) -> Variables:
@@ -308,7 +308,7 @@ def build_kkt(
     dynamics: Function,
     equalities: Function,
     inequalities: Function,
-    x0: jnp.ndarray,
+    x0: jax.Array,
     vars: Variables,
     params: Parameters,
 ) -> KKTSystem:
