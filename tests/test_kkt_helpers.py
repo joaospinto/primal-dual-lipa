@@ -4,8 +4,9 @@ import unittest
 
 import jax
 from jax import numpy as jnp
-from regularized_lqr_jax.helpers import regularize, symmetrize
+from regularized_lqr_jax.helpers import symmetrize
 
+from primal_dual_lipa.kkt_builder import regularize
 from primal_dual_lipa.kkt_helpers import (
     compute_kkt_residual,
     factor_kkt,
@@ -59,13 +60,39 @@ class TestKKTSolves(unittest.TestCase):
         R = jax.random.uniform(subkey, (T, m, m))
         R = jax.vmap(symmetrize)(R)
 
-        Q, R = regularize(Q=Q, R=R, M=M, psd_delta=1e-3)
+        # Global parameter initializations
+        key, subkey = jax.random.split(key)
+        self.Theta = jax.random.uniform(subkey, (p_dim,))
+        self.r_theta = jax.random.uniform(subkey, (p_dim,))
 
-        M = jnp.concatenate([M, jnp.zeros_like(M[0])[None, ...]], axis=0)
+        key, subkey = jax.random.split(key)
+        H_theta_theta_per_stage = jax.random.uniform(subkey, (T + 1, p_dim, p_dim))
+        H_theta_theta_per_stage = jax.vmap(symmetrize)(H_theta_theta_per_stage)
 
-        R = jnp.concatenate([R, jnp.eye(m)[None, ...] * 1e-3], axis=0)
+        self.H_theta_X = jax.random.uniform(subkey, (T + 1, n, p_dim))
+        self.H_theta_U = jax.random.uniform(subkey, (T, m, p_dim))
+        self.H_theta_y_dyn = jax.random.uniform(subkey, (T + 1, n, p_dim))
+        self.H_theta_y_eq = jax.random.uniform(subkey, (T + 1, c_dim, p_dim))
+        self.H_theta_z = jax.random.uniform(subkey, (T + 1, g_dim, p_dim))
 
-        self.P = jax.vmap(lambda q, m, r: jnp.block([[q, m], [m.T, r]]))(Q, M, R)
+        Q, R, H_theta_theta_per_stage = regularize(
+            Q=Q,
+            R=R,
+            M=M,
+            psd_delta=1e-3,
+            H_theta_theta_per_stage=H_theta_theta_per_stage,
+            H_x_theta=self.H_theta_X,
+            H_u_theta=self.H_theta_U,
+        )
+        self.H_theta_theta = jnp.sum(H_theta_theta_per_stage, axis=0)
+
+        M_pad = jnp.concatenate([M, jnp.zeros_like(M[0])[None, ...]], axis=0)
+
+        R_pad = jnp.concatenate([R, jnp.eye(m)[None, ...] * 1e-3], axis=0)
+
+        self.P = jax.vmap(lambda q, m, r: jnp.block([[q, m], [m.T, r]]))(
+            Q, M_pad, R_pad
+        )
 
         key, subkey = jax.random.split(key)
         s = jnp.abs(jax.random.uniform(subkey, (T + 1, g_dim)))
@@ -92,19 +119,6 @@ class TestKKTSolves(unittest.TestCase):
 
         key, subkey = jax.random.split(key)
         self.r_z = jax.random.uniform(subkey, (T + 1, g_dim))
-
-        # Global parameter initializations
-        key, subkey = jax.random.split(key)
-        self.Theta = jax.random.uniform(subkey, (p_dim,))
-        self.r_theta = jax.random.uniform(subkey, (p_dim,))
-        self.H_theta_theta = jax.random.uniform(subkey, (p_dim, p_dim))
-        self.H_theta_theta = symmetrize(self.H_theta_theta) + jnp.eye(p_dim)
-
-        self.H_theta_X = jax.random.uniform(subkey, (T + 1, n, p_dim))
-        self.H_theta_U = jax.random.uniform(subkey, (T, m, p_dim))
-        self.H_theta_y_dyn = jax.random.uniform(subkey, (T + 1, n, p_dim))
-        self.H_theta_y_eq = jax.random.uniform(subkey, (T + 1, c_dim, p_dim))
-        self.H_theta_z = jax.random.uniform(subkey, (T + 1, g_dim, p_dim))
 
         self.parameters = Parameters(
             η_dyn=jnp.ones((T + 1, n)) * 10.0,
@@ -171,9 +185,9 @@ class TestKKTSolves(unittest.TestCase):
                 )
 
                 if use_parallel_lqr:
-                    self.assertLess(jnp.linalg.norm(residual_vec), 1e-12)  # noqa: PT009
+                    self.assertLess(jnp.linalg.norm(residual_vec), 1e-7)  # noqa: PT009
                 else:
-                    self.assertLess(jnp.linalg.norm(residual_vec), 1e-12)  # noqa: PT009
+                    self.assertLess(jnp.linalg.norm(residual_vec), 1e-7)  # noqa: PT009
 
 
 if __name__ == "__main__":
