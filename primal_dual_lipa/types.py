@@ -36,6 +36,9 @@ class SolverSettings:
     κ: jnp.double = 10.0
     armijo_factor: jnp.double = 1e-4
     num_iterative_refinement_steps: jnp.int32 = 0
+    num_parallel_line_search_steps: jnp.int32 = field(
+        default=1, metadata={"static": True}
+    )
     use_parallel_lqr: jnp.bool = field(default=False, metadata={"static": True})
     print_logs: jnp.bool = field(default=False, metadata={"static": True})
     print_ls_logs: jnp.bool = field(default=False, metadata={"static": True})

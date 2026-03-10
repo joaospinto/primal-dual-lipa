@@ -275,10 +275,7 @@ def solve(
                 ordered=True,
             )
 
-        def line_search_loop_body(α: jnp.double) -> jnp.double:
-            return α * settings.α_update_factor
-
-        def line_search_loop_continuation_criteria(α: jnp.double) -> jnp.bool:
+        def check_alpha(α: jnp.double) -> jnp.bool:
             candidate_merit = dal(α)
             armijo_condition_met = (
                 candidate_merit - baseline_merit
@@ -310,14 +307,45 @@ def solve(
                     dmerit / α,
                     ordered=True,
                 )
-            return jnp.logical_and(
-                α > settings.α_min, jnp.logical_not(armijo_condition_met)
-            )
+            return armijo_condition_met
 
-        α = jax.lax.while_loop(
-            line_search_loop_continuation_criteria,
-            line_search_loop_body,
-            α_max_s,
+        def line_search_iteration(
+            state: tuple[jnp.double, jnp.bool, jnp.double],
+        ) -> tuple[jnp.double, jnp.bool, jnp.double]:
+            α_base, _, _ = state
+            factors = settings.α_update_factor ** jnp.arange(
+                settings.num_parallel_line_search_steps
+            )
+            alphas = α_base * factors
+            armijo_mets = jax.vmap(check_alpha)(alphas)
+
+            combined_condition = jnp.logical_or(armijo_mets, alphas <= settings.α_min)
+            indices = jnp.arange(settings.num_parallel_line_search_steps)
+            valid_indices = jnp.where(
+                combined_condition, indices, settings.num_parallel_line_search_steps
+            )
+            first_idx = jnp.min(valid_indices)
+
+            found_now = first_idx < settings.num_parallel_line_search_steps
+            α_res = alphas[
+                jnp.minimum(first_idx, settings.num_parallel_line_search_steps - 1)
+            ]
+
+            new_α_base = α_base * (
+                settings.α_update_factor**settings.num_parallel_line_search_steps
+            )
+            return new_α_base, found_now, α_res
+
+        def line_search_cond(
+            state: tuple[jnp.double, jnp.bool, jnp.double],
+        ) -> jnp.bool:
+            _, found, _ = state
+            return jnp.logical_not(found)
+
+        _, _, α = jax.lax.while_loop(
+            line_search_cond,
+            line_search_iteration,
+            (α_max_s, False, 0.0),
         )
 
         if settings.print_logs:

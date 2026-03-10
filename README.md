@@ -27,6 +27,7 @@ Here are some ways in which we improve on these libraries:
 | ------------------------------- | -------- | ------- | ---- |
 | Multiple shooting               | ❌       | ✅      | ✅   |
 | Efficient GPU usage             | ❌       | ✅      | ✅   |
+| Parallel line search            | ❌       | ✅      | ✅   |
 | IPM for inequalities            | ❌       | ❌      | ✅   |
 | Cross-stage terms               | ❌       | ❌      | ✅   |
 | Iterative refinement            | ❌       | ❌      | ✅   |
