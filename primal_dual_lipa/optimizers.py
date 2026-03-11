@@ -9,6 +9,7 @@ from primal_dual_lipa.kkt_builder import build_kkt, build_kkt_rhs
 from primal_dual_lipa.kkt_helpers import (
     compute_kkt_residual,
     factor_kkt,
+    ruiz_scaling,
     solve_kkt,
 )
 from primal_dual_lipa.lagrangian_helpers import directional_augmented_lagrangian, pad
@@ -134,15 +135,32 @@ def solve(
             iteration,
         ) = inputs
 
+        kkt_system_to_solve, scaling_factors = jax.lax.cond(
+            settings.num_ruiz_scaling_steps > 0,
+            lambda: ruiz_scaling(kkt_system, settings.num_ruiz_scaling_steps),
+            lambda: (
+                kkt_system,
+                Variables(
+                    X=jnp.ones_like(vars.X),
+                    U=jnp.ones_like(vars.U),
+                    S=jnp.ones_like(vars.S),
+                    Y_dyn=jnp.ones_like(vars.Y_dyn),
+                    Y_eq=jnp.ones_like(vars.Y_eq),
+                    Z=jnp.ones_like(vars.Z),
+                    Theta=jnp.ones_like(vars.Theta),
+                ),
+            ),
+        )
+
         factorization_outputs = factor_kkt(
-            inputs=kkt_system.lhs,
+            inputs=kkt_system_to_solve.lhs,
             use_parallel_lqr=settings.use_parallel_lqr,
         )
 
         deltas = solve_kkt(
             factorization_outputs=factorization_outputs,
-            factorization_inputs=kkt_system.lhs,
-            rhs=kkt_system.rhs,
+            factorization_inputs=kkt_system_to_solve.lhs,
+            rhs=kkt_system_to_solve.rhs,
             use_parallel_lqr=settings.use_parallel_lqr,
         )
 
@@ -156,14 +174,14 @@ def solve(
         ) -> tuple[Variables, jnp.int32]:
             deltas_inner, it = x
             residuals = compute_kkt_residual(
-                factorization_inputs=kkt_system.lhs,
-                solve_inputs=kkt_system.rhs,
+                factorization_inputs=kkt_system_to_solve.lhs,
+                solve_inputs=kkt_system_to_solve.rhs,
                 solution=deltas_inner,
             )
 
             refinement_deltas = solve_kkt(
                 factorization_outputs=factorization_outputs,
-                factorization_inputs=kkt_system.lhs,
+                factorization_inputs=kkt_system_to_solve.lhs,
                 rhs=residuals,
                 use_parallel_lqr=settings.use_parallel_lqr,
             )
@@ -185,6 +203,16 @@ def solve(
             iterative_refinement_loop_continuation_criteria,
             iterative_refinement_loop_body,
             (deltas, 0),
+        )
+
+        deltas = Variables(
+            X=deltas.X * scaling_factors.X,
+            U=deltas.U * scaling_factors.U,
+            S=deltas.S * scaling_factors.S,
+            Y_dyn=deltas.Y_dyn * scaling_factors.Y_dyn,
+            Y_eq=deltas.Y_eq * scaling_factors.Y_eq,
+            Z=deltas.Z * scaling_factors.Z,
+            Theta=deltas.Theta * scaling_factors.Theta,
         )
 
         τ = jnp.maximum(settings.τ_min, 1.0 - params.µ)

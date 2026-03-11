@@ -36,6 +36,7 @@ class SolverSettings:
     κ: jnp.double = 10.0
     armijo_factor: jnp.double = 1e-4
     num_iterative_refinement_steps: jnp.int32 = 0
+    num_ruiz_scaling_steps: jnp.int32 = 0
     num_parallel_line_search_steps: jnp.int32 = field(
         default=1, metadata={"static": True}
     )

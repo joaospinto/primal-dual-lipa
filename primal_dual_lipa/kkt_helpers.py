@@ -49,8 +49,226 @@ from primal_dual_lipa.lagrangian_helpers import pad
 from primal_dual_lipa.types import (
     KKTFactorizationInputs,
     KKTFactorizationOutputs,
+    KKTSystem,
+    Parameters,
     Variables,
 )
+
+
+@partial(
+    jax.jit,
+    static_argnames=("num_steps",),
+)
+def ruiz_scaling(
+    kkt_system: KKTSystem, num_steps: int
+) -> tuple[KKTSystem, Variables]:
+    """Perform Ruiz scaling on the KKT system."""
+    lhs = kkt_system.lhs
+    rhs = kkt_system.rhs
+
+    T = rhs.X.shape[0] - 1
+    n = rhs.X.shape[1]
+    m = rhs.U.shape[1]
+    g = rhs.S.shape[1]
+    c = rhs.Y_eq.shape[1]
+    p = rhs.Theta.shape[0]
+
+    # Initialize scaling
+    d_X = jnp.ones((T + 1, n))
+    d_U = jnp.ones((T, m))
+    d_S = jnp.ones((T + 1, g))
+    d_Y_dyn = jnp.ones((T + 1, n))
+    d_Y_eq = jnp.ones((T + 1, c))
+    d_Z = jnp.ones((T + 1, g))
+    d_Theta = jnp.ones(p)
+
+    # Precompute transposes
+    Dx = lhs.D[:, :, :n]
+    Du = lhs.D[:, :, n:]
+    Dx_T = jnp.transpose(Dx, (0, 2, 1))
+    Du_T = jnp.transpose(Du, (0, 2, 1))
+
+    Ex = lhs.E[:, :, :n]
+    Eu = lhs.E[:, :, n:]
+    Ex_T = jnp.transpose(Ex, (0, 2, 1))
+    Eu_T = jnp.transpose(Eu, (0, 2, 1))
+
+    Gx = lhs.G[:, :, :n]
+    Gu = lhs.G[:, :, n:]
+    Gx_T = jnp.transpose(Gx, (0, 2, 1))
+    Gu_T = jnp.transpose(Gu, (0, 2, 1))
+
+    def get_row_max(A, d_col):
+        return jnp.max(jnp.abs(A) * d_col[..., None, :], axis=-1, initial=0.0)
+
+    def body_fn(i, scaling):
+        dX, dU, dS, dYd, dYe, dZ, dTh = scaling
+
+        dU_pad = jnp.concatenate([dU, jnp.ones((1, m))], axis=0)
+
+        # Row X
+        rX = get_row_max(lhs.P[:, :n, :n], dX)
+        rX = jnp.maximum(rX, get_row_max(lhs.P[:, :n, n:], dU_pad))
+        rX = jnp.maximum(rX, dYd)
+        rX = jnp.maximum(
+            rX,
+            jnp.concatenate(
+                [get_row_max(Dx_T, dYd[1:]), jnp.zeros((1, n))],
+                axis=0,
+            ),
+        )
+        rX = jnp.maximum(rX, get_row_max(Ex_T, dYe))
+        rX = jnp.maximum(rX, get_row_max(Gx_T, dZ))
+        rX = jnp.maximum(rX, get_row_max(lhs.H_theta_X, dTh))
+        rX = dX * rX
+
+        # Row U
+        rU = get_row_max(lhs.P[:-1, n:, :n], dX[:-1])
+        rU = jnp.maximum(rU, get_row_max(lhs.P[:-1, n:, n:], dU))
+        rU = jnp.maximum(rU, get_row_max(Du_T, dYd[1:]))
+        rU = jnp.maximum(rU, get_row_max(Eu_T[:-1], dYe[:-1]))
+        rU = jnp.maximum(rU, get_row_max(Gu_T[:-1], dZ[:-1]))
+        rU = jnp.maximum(rU, get_row_max(lhs.H_theta_U, dTh))
+        rU = dU * rU
+
+        # Row S
+        rS = lhs.w_inv * dS
+        rS = jnp.maximum(rS, dZ)
+        rS = dS * rS
+
+        # Row Y_eq
+        rYe = get_row_max(Ex, dX)
+        rYe = jnp.maximum(
+            rYe,
+            jnp.concatenate(
+                [get_row_max(Eu[:-1], dU), jnp.zeros((1, c))],
+                axis=0,
+            ),
+        )
+        rYe = jnp.maximum(rYe, (1.0 / lhs.params.η_eq) * dYe)
+        rYe = jnp.maximum(rYe, get_row_max(lhs.H_theta_y_eq, dTh))
+        rYe = dYe * rYe
+
+        # Row Theta
+        rTh = get_row_max(lhs.H_theta_theta, dTh)
+        rTh = jnp.maximum(
+            rTh,
+            jnp.max(
+                jnp.abs(lhs.H_theta_X) * dX[..., None], axis=(0, 1), initial=0.0
+            ),
+        )
+        rTh = jnp.maximum(
+            rTh,
+            jnp.max(
+                jnp.abs(lhs.H_theta_U) * dU[..., None], axis=(0, 1), initial=0.0
+            ),
+        )
+        rTh = jnp.maximum(
+            rTh,
+            jnp.max(
+                jnp.abs(lhs.H_theta_y_dyn) * dYd[..., None],
+                axis=(0, 1),
+                initial=0.0,
+            ),
+        )
+        rTh = jnp.maximum(
+            rTh,
+            jnp.max(
+                jnp.abs(lhs.H_theta_y_eq) * dYe[..., None],
+                axis=(0, 1),
+                initial=0.0,
+            ),
+        )
+        rTh = jnp.maximum(
+            rTh,
+            jnp.max(
+                jnp.abs(lhs.H_theta_z) * dZ[..., None], axis=(0, 1), initial=0.0
+            ),
+        )
+        rTh = dTh * rTh
+
+        # Update scaling factors for the free variables
+        dX_new = dX / jnp.sqrt(jnp.clip(rX, a_min=1e-12))
+        dU_new = dU / jnp.sqrt(jnp.clip(rU, a_min=1e-12))
+        dS_new = dS / jnp.sqrt(jnp.clip(rS, a_min=1e-12))
+        dYe_new = dYe / jnp.sqrt(jnp.clip(rYe, a_min=1e-12))
+        dTh_new = dTh / jnp.sqrt(jnp.clip(rTh, a_min=1e-12))
+
+        # Enforce structural constraints for the dependent variables
+        dYd_new = 1.0 / dX_new
+        dZ_new = 1.0 / dS_new
+
+        return (dX_new, dU_new, dS_new, dYd_new, dYe_new, dZ_new, dTh_new)
+
+    scaling = jax.lax.fori_loop(
+        0, num_steps, body_fn, (d_X, d_U, d_S, d_Y_dyn, d_Y_eq, d_Z, d_Theta)
+    )
+    dX, dU, dS, dYd, dYe, dZ, dTh = scaling
+
+    # Scale LHS
+    dU_pad = jnp.concatenate([dU, jnp.ones((1, m))], axis=0)
+    d_XU = jnp.concatenate([dX, dU_pad], axis=1)
+
+    P_scaled = lhs.P * d_XU[..., :, None] * d_XU[..., None, :]
+    D_scaled = lhs.D * dYd[1:, :, None] * d_XU[:-1, None, :]
+    E_scaled = lhs.E * dYe[..., :, None] * d_XU[..., None, :]
+    G_scaled = lhs.G * dZ[..., :, None] * d_XU[..., None, :]
+
+    w_inv_scaled = lhs.w_inv * dS * dS
+    η_dyn_scaled = lhs.params.η_dyn / jnp.square(dYd)
+    η_eq_scaled = lhs.params.η_eq / jnp.square(dYe)
+    η_ineq_scaled = lhs.params.η_ineq / jnp.square(dZ)
+
+    H_theta_theta_scaled = lhs.H_theta_theta * dTh[:, None] * dTh[None, :]
+    H_theta_X_scaled = lhs.H_theta_X * dX[..., None] * dTh[None, None, :]
+    H_theta_U_scaled = lhs.H_theta_U * dU[..., None] * dTh[None, None, :]
+    H_theta_y_dyn_scaled = (
+        lhs.H_theta_y_dyn * dYd[..., None] * dTh[None, None, :]
+    )
+    H_theta_y_eq_scaled = lhs.H_theta_y_eq * dYe[..., None] * dTh[None, None, :]
+    H_theta_z_scaled = lhs.H_theta_z * dZ[..., None] * dTh[None, None, :]
+
+    scaled_lhs = KKTFactorizationInputs(
+        P=P_scaled,
+        D=D_scaled,
+        E=E_scaled,
+        G=G_scaled,
+        w_inv=w_inv_scaled,
+        params=Parameters(
+            µ=lhs.params.µ,
+            η_dyn=η_dyn_scaled,
+            η_eq=η_eq_scaled,
+            η_ineq=η_ineq_scaled,
+        ),
+        H_theta_theta=H_theta_theta_scaled,
+        H_theta_X=H_theta_X_scaled,
+        H_theta_U=H_theta_U_scaled,
+        H_theta_y_dyn=H_theta_y_dyn_scaled,
+        H_theta_y_eq=H_theta_y_eq_scaled,
+        H_theta_z=H_theta_z_scaled,
+    )
+
+    scaled_rhs = Variables(
+        X=rhs.X * dX,
+        U=rhs.U * dU,
+        S=rhs.S * dS,
+        Y_dyn=rhs.Y_dyn * dYd,
+        Y_eq=rhs.Y_eq * dYe,
+        Z=rhs.Z * dZ,
+        Theta=rhs.Theta * dTh,
+    )
+
+    scaling_factors = Variables(
+        X=dX,
+        U=dU,
+        S=dS,
+        Y_dyn=dYd,
+        Y_eq=dYe,
+        Z=dZ,
+        Theta=dTh,
+    )
+
+    return KKTSystem(lhs=scaled_lhs, rhs=scaled_rhs), scaling_factors
 
 
 @partial(
