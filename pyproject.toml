@@ -14,6 +14,7 @@ description = "Implements https://arxiv.org/abs/2509.16370"
 license = "MIT"
 
 [project.optional-dependencies]
+test = ["matplotlib"]
 lint = ["ruff"]
 
 [tool.ruff]
