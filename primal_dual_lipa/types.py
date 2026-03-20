@@ -40,6 +40,7 @@ class SolverSettings:
         default=1, metadata={"static": True}
     )
     use_parallel_lqr: jnp.bool = field(default=False, metadata={"static": True})
+    skip_line_search: jnp.bool = field(default=False, metadata={"static": True})
     print_logs: jnp.bool = field(default=False, metadata={"static": True})
     print_ls_logs: jnp.bool = field(default=False, metadata={"static": True})
 

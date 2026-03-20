@@ -418,7 +418,6 @@ class TestQuadpendulum(unittest.TestCase):
         settings = SolverSettings(
             max_iterations=2000,
             residual_sq_threshold=1e-8,
-            α_min=0.5,
             η0=10.0,
             η_max=1e9,
             η_update_factor=1.1,
@@ -426,6 +425,7 @@ class TestQuadpendulum(unittest.TestCase):
             µ_update_factor=0.9,
             µ_min=1e-16,
             num_iterative_refinement_steps=1,
+            skip_line_search=True,
             print_logs=True,
             # print_ls_logs=True,
         )

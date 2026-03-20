@@ -342,11 +342,14 @@ def solve(
             _, found, _ = state
             return jnp.logical_not(found)
 
-        _, _, α = jax.lax.while_loop(
-            line_search_cond,
-            line_search_iteration,
-            (α_max_s, False, 0.0),
-        )
+        if settings.skip_line_search:
+            α = α_max_s
+        else:
+            _, _, α = jax.lax.while_loop(
+                line_search_cond,
+                line_search_iteration,
+                (α_max_s, False, 0.0),
+            )
 
         if settings.print_logs:
             residuals = compute_kkt_residual(
