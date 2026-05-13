@@ -23,6 +23,16 @@ class SolverSettings:
 
     max_iterations: jnp.int32 = 500
     residual_sq_threshold: jnp.double = 1e-16
+    # Auxiliary termination criterion: declared converged when the cost
+    # improvement and the primal violation (sum of squared dynamics + equality
+    # + (g+s) inequality residuals) both fall strictly below their thresholds.
+    # Both default to 0, which disables this criterion (no real value of either
+    # quantity can be < 0). When enabled, LIPA terminates if EITHER this
+    # criterion or `residual_sq_threshold` is satisfied. Useful for matching
+    # SQP-style termination when the full KKT residual is dominated by η·J^T·c
+    # gradient terms that don't decay.
+    cost_improvement_threshold: jnp.double = 0.0
+    primal_violation_threshold: jnp.double = 0.0
     α_min: jnp.double = 3e-6
     α_update_factor: jnp.double = 0.5
     η0: jnp.double = 1e3

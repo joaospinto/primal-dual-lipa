@@ -119,18 +119,24 @@ def solve(
             Parameters,
             KKTSystem,
             jnp.int32,
+            jnp.double,
+            jnp.double,
         ],
     ) -> tuple[
         Variables,
         Parameters,
         KKTSystem,
         jnp.int32,
+        jnp.double,
+        jnp.double,
     ]:
         (
             vars,
             params,
             kkt_system,
             iteration,
+            prev_iter_cost,
+            _last_improvement,
         ) = inputs
 
         factorization_outputs = factor_kkt(
@@ -550,11 +556,22 @@ def solve(
         # so the continuation criterion exits on the next check.
         iteration += jnp.where(nan_in_update, settings.max_iterations + 1, 1)
 
+        # Track cost of new iterate (and its improvement vs previous iterate)
+        # for the auxiliary cost-improvement / primal-violation termination.
+        # On NaN we kept old vars, so report no improvement.
+        new_iter_cost = vectorize(cost)(
+            updated_vars.X, pad(updated_vars.U), updated_vars.Theta, Tp1_range
+        ).sum()
+        new_iter_cost = jnp.where(nan_in_update, prev_iter_cost, new_iter_cost)
+        last_improvement = prev_iter_cost - new_iter_cost
+
         return (
             updated_vars,
             updated_params,
             kkt_system_new,
             iteration,
+            new_iter_cost,
+            last_improvement,
         )
 
     def main_loop_continuation_criteria(
@@ -563,6 +580,8 @@ def solve(
             Parameters,
             KKTSystem,
             jnp.int32,
+            jnp.double,
+            jnp.double,
         ],
     ) -> jnp.bool:
         (
@@ -570,6 +589,8 @@ def solve(
             _unused_params,
             kkt_system,
             iteration,
+            _last_iter_cost,
+            last_improvement,
         ) = inputs
 
         residual = jnp.concatenate(
@@ -587,16 +608,38 @@ def solve(
             ]
         )
         converged = jnp.sum(jnp.square(residual)) <= settings.residual_sq_threshold
-        hit_iteration_limit = iteration >= settings.max_iterations
-        return jnp.logical_and(
-            jnp.logical_not(converged), jnp.logical_not(hit_iteration_limit)
+
+        # Auxiliary SQP-style termination: declared converged when both the
+        # cost improvement and the primal-residual squared norm are strictly
+        # below their thresholds. With both thresholds at their default of 0
+        # this never fires (no real value of either quantity is < 0), so the
+        # original KKT-residual criterion is the sole gate.
+        primal_violation = (
+            jnp.sum(jnp.square(kkt_system.rhs.Y_dyn))
+            + jnp.sum(jnp.square(kkt_system.rhs.Y_eq))
+            + jnp.sum(jnp.square(kkt_system.rhs.Z))
+        )
+        aux_converged = jnp.logical_and(
+            last_improvement < settings.cost_improvement_threshold,
+            primal_violation < settings.primal_violation_threshold,
         )
 
+        any_converged = jnp.logical_or(converged, aux_converged)
+        hit_iteration_limit = iteration >= settings.max_iterations
+        return jnp.logical_and(
+            jnp.logical_not(any_converged), jnp.logical_not(hit_iteration_limit)
+        )
+
+    init_iter_cost = vectorize(cost)(
+        vars_current.X, pad(vars_current.U), vars_current.Theta, jnp.arange(T + 1)
+    ).sum()
     (
         vars_out,
         _unused_params,  # noqa: RUF059
         _unused_kkt_system,
         iteration,
+        _final_iter_cost,
+        _final_improvement,
     ) = jax.lax.while_loop(
         main_loop_continuation_criteria,
         main_loop_body,
@@ -605,6 +648,8 @@ def solve(
             params_current,
             kkt_system,
             0,
+            init_iter_cost,
+            jnp.array(jnp.inf, dtype=jnp.float64),
         ),
     )
 
