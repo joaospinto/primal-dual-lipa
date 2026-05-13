@@ -30,7 +30,6 @@ from primal_dual_lipa.vectorization_helpers import vectorize
         "dynamics",
         "equalities",
         "inequalities",
-        "settings",
     ],
 )
 def solve(
