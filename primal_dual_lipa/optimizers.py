@@ -449,6 +449,26 @@ def solve(
             Theta=vars.Theta + α * deltas.Theta,
         )
 
+        # Safety net: revert if the step produced any non-finite value
+        # (NaN/Inf), and force-exit the main loop on the next iteration (by
+        # jumping iteration past max_iterations). This prevents propagation
+        # when the KKT factorization or line search misbehaves on
+        # ill-conditioned problems. The returned `no_errors` will be False.
+        nan_in_update = jnp.logical_not(
+            jnp.all(jnp.isfinite(updated_vars.X))
+            & jnp.all(jnp.isfinite(updated_vars.U))
+            & jnp.all(jnp.isfinite(updated_vars.S))
+            & jnp.all(jnp.isfinite(updated_vars.Y_dyn))
+            & jnp.all(jnp.isfinite(updated_vars.Y_eq))
+            & jnp.all(jnp.isfinite(updated_vars.Z))
+            & jnp.all(jnp.isfinite(updated_vars.Theta))
+        )
+        updated_vars = jax.tree_util.tree_map(
+            lambda new, old: jnp.where(nan_in_update, old, new),
+            updated_vars,
+            vars,
+        )
+
         new_residual = build_kkt_rhs(
             cost=cost,
             dynamics=dynamics,
@@ -526,7 +546,9 @@ def solve(
             params=updated_params,
         )
 
-        iteration += 1
+        # On NaN we already reverted vars; jump iteration past max_iterations
+        # so the continuation criterion exits on the next check.
+        iteration += jnp.where(nan_in_update, settings.max_iterations + 1, 1)
 
         return (
             updated_vars,
