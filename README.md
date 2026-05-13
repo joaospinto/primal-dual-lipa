@@ -51,16 +51,48 @@ that are enabled by our solver.
 
 ### Quadpendulum
 
-This example, which can be run with `uv run python -m unittest tests/test_quadpendulum.py`,
+This example, which can be run with `uv run --extra test python -m unittest tests/test_quadpendulum.py`,
 optimizes the trajectory of a quadpendulum to reach a target goal-state,
 while maximizing the worst-case distance to some circular obstacles.
 This requires using cross-stage variables in both the costs and in the constraints.
 
 https://github.com/user-attachments/assets/bba4ad30-25d7-434e-b8cb-861a9fddf0d8
 
+### Backflip
+
+This example, which can be run with
+`uv run --extra mpc-examples python -m tests.mpc_examples.run_offline --task h1_backflip --video h1_backflip.mp4`,
+optimizes the trajectory of a humanoid robot doing a backflip.
+
+https://github.com/user-attachments/assets/1184ad08-3d06-465b-aca5-5db6e8cb5b0f
+
+### Barrel Roll
+
+This example, which can be run with
+`uv run --extra mpc-examples python -m tests.mpc_examples.run_offline --task barrel_roll --video barrel_roll.mp4`,
+optimizes the trajectory of a four-legged robot doing a barrel roll.
+
+https://github.com/user-attachments/assets/6b7ffda4-0a14-42ae-8234-8c882b0fb991
+
+### Trotting
+
+This example, which can be run with
+`uv run --extra mpc-examples python -m tests.mpc_examples.run_offline --task aliengo_trot --video aliengo_trot.mp4`,
+optimizes the trajectory of a four-legged robot trotting.
+
+https://github.com/user-attachments/assets/07b234f9-cd09-4090-a4b0-9ba63a72cd13
+
+### Humanoid jump
+
+This example, which can be run with
+`uv run --extra mpc-examples python -m tests.mpc_examples.run_offline --task h1_jump_forward --video h1_jump_forward.mp4`,
+optimizes the trajectory of a humanoid doing two consecutive jumps.
+
+https://github.com/user-attachments/assets/78c329e5-c233-4364-9041-3b3fd0689671
+
 ### Cartpole
 
-This example, which can be run with `uv run python -m unittest tests/test_cartpole.py`,
+This example, which can be run with `uv run --extra test python -m unittest tests/test_cartpole.py`,
 optimizes the trajectory of a quadpendulum to reach a target goal-state,
 while imposing some control bounds.
 

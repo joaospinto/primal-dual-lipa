@@ -16,6 +16,7 @@ license = "MIT"
 [project.optional-dependencies]
 test = ["matplotlib"]
 lint = ["ruff"]
+mpc-examples = ["mujoco", "mujoco-mjx", "matplotlib", "imageio[ffmpeg]"]
 
 [tool.ruff]
 line-length = 88
@@ -33,4 +34,4 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["primal-dual-lipa"]
+packages = ["primal_dual_lipa"]

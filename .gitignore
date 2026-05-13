@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# JAX persistent compilation cache (set by tests/mpc_examples/run_offline.py).
+jax_cache/
+
+# Generated MPC example videos — produced by `python -m tests.mpc_examples.run_offline --video ...`.
+mpc_videos/
