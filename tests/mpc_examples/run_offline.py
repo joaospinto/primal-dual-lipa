@@ -95,8 +95,23 @@ def _load_config(task_name: str):
     return importlib.import_module(TASKS[task_name])
 
 
+def _ensure_assets(config) -> None:
+    """Trigger asset fetch if config points to one of the known robots."""
+    from tests.mpc_examples import fetch_assets
+
+    # Heuristic: match robot names from model path.
+    robots = []
+    if "aliengo" in config.model_path:
+        robots.append("aliengo")
+    if "unitree_h1" in config.model_path:
+        robots.append("unitree_h1")
+    if robots:
+        fetch_assets.fetch(robots)
+
+
 def _foot_positions(config) -> jnp.ndarray:
     """MuJoCo forward-kinematics-derived initial foot positions for the warm start."""
+    _ensure_assets(config)
     model = mujoco.MjModel.from_xml_path(config.model_path)
     data = mujoco.MjData(model)
     qpos = jnp.concatenate([config.p0, config.quat0, config.q0])
@@ -112,6 +127,7 @@ def _foot_positions(config) -> jnp.ndarray:
 def solve_task(task_name: str, *, max_iter: int = 100, verbose: bool = True) -> dict:
     """Build the MJX model, generate the reference, run LIPA offline. Returns the result dict."""
     config = _load_config(task_name)
+    _ensure_assets(config)
 
     model = mujoco.MjModel.from_xml_path(config.model_path)
     mjx_model = mjx.put_model(model)

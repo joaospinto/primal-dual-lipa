@@ -15,21 +15,18 @@ import os
 import unittest
 from pathlib import Path
 
+from tests.mpc_examples import fetch_assets, run_offline
+
 _RUN = os.environ.get("RUN_MPC_TESTS")
 
 
-def _assets_present() -> bool:
-    data_dir = Path(__file__).resolve().parent / "mpc_examples" / "data"
-    return (data_dir / "aliengo" / "scene_flat.xml").exists()
-
-
 @unittest.skipUnless(_RUN, "set RUN_MPC_TESTS=1 to run mpc-example smoke tests")
-@unittest.skipUnless(
-    _assets_present(),
-    "fetch assets first: `python -m tests.mpc_examples.fetch_assets --robots aliengo`",
-)
 class TestBarrelRoll(unittest.TestCase):
     """Solve the barrel-roll task and check the solver converged sensibly."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        fetch_assets.fetch(["aliengo"])
 
     def test(self) -> None:
         from tests.mpc_examples.run_offline import solve_task
