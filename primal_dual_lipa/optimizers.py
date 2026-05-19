@@ -40,7 +40,8 @@ def solve(
     settings: SolverSettings,
     equalities: Function = lambda x, u, theta, t: jnp.empty(0),
     inequalities: Function = lambda x, u, theta, t: jnp.empty(0),
-) -> tuple[Variables, jnp.int32, jnp.bool]:
+    params_in: Parameters | None = None,
+) -> tuple[Variables, jnp.int32, jnp.bool, Parameters]:
     """Implement the Primal-Dual LIPA algorithm for discrete-time optimal control.
 
     Args:
@@ -51,11 +52,16 @@ def solve(
       equalities:    equalities(x, u, theta, t) = 0 should hold; output is (c_dim,).
       inequalities:  inequalities(x, u, theta, t) <= 0 should hold; output is (g_dim,).
       settings:      the solver settings.
+      params_in:     Optional warm-start Parameters (µ, η_dyn, η_eq, η_ineq).
+                     If None, initialized from settings.µ0 / settings.η0.
+                     Useful for debugging and iterating from a previously
+                     saved iterate without re-paying the ramp-up phase.
 
     Returns:
       Variables:   Variables object containing the solution for X, U, S, Y_dyn, Y_eq, Z, Theta.
       iterations:  the number of iterations it took to converge.
       no_errors:   whether no errors were encountered during the solve.
+      params:      Final Parameters (µ, η_dyn, η_eq, η_ineq) at termination.
 
     """
     vars_current = Variables(
@@ -74,10 +80,20 @@ def solve(
     c_dim = vars_current.Y_eq.shape[-1]
     g_dim = vars_current.S.shape[-1]
 
-    η_dyn = jnp.full((T + 1, n), settings.η0)
-    η_eq = jnp.full((T + 1, c_dim), settings.η0)
-    η_ineq = jnp.full((T + 1, g_dim), settings.η0)
-    params_current = Parameters(µ=settings.µ0, η_dyn=η_dyn, η_eq=η_eq, η_ineq=η_ineq)
+    if params_in is not None:
+        params_current = Parameters(
+            µ=params_in.µ,
+            η_dyn=params_in.η_dyn,
+            η_eq=params_in.η_eq,
+            η_ineq=params_in.η_ineq,
+        )
+    else:
+        η_dyn = jnp.full((T + 1, n), settings.η0)
+        η_eq = jnp.full((T + 1, c_dim), settings.η0)
+        η_ineq = jnp.full((T + 1, g_dim), settings.η0)
+        params_current = Parameters(
+            µ=settings.µ0, η_dyn=η_dyn, η_eq=η_eq, η_ineq=η_ineq
+        )
 
     kkt_system = build_kkt(
         cost=cost,
@@ -121,12 +137,16 @@ def solve(
             jnp.int32,
             jnp.double,
             jnp.double,
+            jnp.double,
+            jnp.double,
         ],
     ) -> tuple[
         Variables,
         Parameters,
         KKTSystem,
         jnp.int32,
+        jnp.double,
+        jnp.double,
         jnp.double,
         jnp.double,
     ]:
@@ -137,6 +157,10 @@ def solve(
             iteration,
             prev_iter_cost,
             _last_improvement,
+            # Filter envelope: smallest θ and f seen so far. +∞ on entry
+            # so the very first iterate is unconditionally acceptable.
+            filter_theta,
+            filter_f,
         ) = inputs
 
         factorization_outputs = factor_kkt(
@@ -280,12 +304,56 @@ def solve(
                 ordered=True,
             )
 
+        def compute_theta_f(α: jnp.double) -> tuple[jnp.double, jnp.double]:
+            """Compute (θ, f) at trial step `α` for the filter line search.
+
+            θ = squared L2 norm of the primal violation (dyn + eq + (g+s)).
+            f = barrier-augmented objective (cost − μ·sum_log_S), i.e. the
+            cost component of the merit function in `dal` excluding the
+            augmented-Lagrangian dual penalty terms.
+            """
+            cX = vars.X + α * deltas.X
+            cU = vars.U + α * deltas.U
+            cU_pad = pad(cU)
+            cS = jnp.maximum(vars.S + α * deltas.S, (1.0 - τ) * vars.S)
+            cTheta = vars.Theta + α * deltas.Theta
+
+            c_dyn0 = x0 - cX[0]
+            c_dyn = vectorize(dynamics)(cX[:-1], cU, cTheta, T_range) - cX[1:]
+            c_eq = vectorize(equalities)(cX, cU_pad, cTheta, Tp1_range)
+            g = vectorize(inequalities)(cX, cU_pad, cTheta, Tp1_range)
+            gps = (g + cS).flatten()
+            c_all = jnp.concatenate(
+                [c_dyn0.flatten(), c_dyn.flatten(), c_eq.flatten(), gps]
+            )
+            theta = jnp.sum(jnp.square(c_all))
+
+            f_cost = vectorize(cost)(cX, cU_pad, cTheta, Tp1_range).sum()
+            f_barrier = -params.µ * jnp.sum(jnp.log(cS))
+            f_val = f_cost + f_barrier
+            return theta, f_val
+
         def check_alpha(α: jnp.double) -> jnp.bool:
             candidate_merit = dal(α)
             armijo_condition_met = (
                 candidate_merit - baseline_merit
                 <= α * settings.armijo_factor * merit_grad
             )
+            if settings.use_filter_line_search:
+                # Accept if EITHER the primal violation θ or the
+                # barrier-augmented objective f strictly improves on the
+                # historical envelope, with a wedge margin (Wächter–Biegler
+                # 2006 §3, eq. 18-19). ORed with the Armijo condition so
+                # the filter strictly enlarges the acceptable α set.
+                theta_α, f_α = compute_theta_f(α)
+                filter_accept = jnp.logical_or(
+                    theta_α <= (1.0 - settings.filter_gamma_theta) * filter_theta,
+                    f_α <= filter_f - settings.filter_gamma_f * filter_theta,
+                )
+                accepted = jnp.logical_or(armijo_condition_met, filter_accept)
+            else:
+                accepted = armijo_condition_met
+
             if settings.print_ls_logs:
                 cX = vars.X + α * deltas.X
                 cU = vars.U + α * deltas.U
@@ -312,7 +380,7 @@ def solve(
                     dmerit / α,
                     ordered=True,
                 )
-            return armijo_condition_met
+            return accepted
 
         def line_search_iteration(
             state: tuple[jnp.double, jnp.bool, jnp.double],
@@ -526,7 +594,7 @@ def solve(
                 new_residual.Theta.flatten(),
             ]
         )
-        µ_new = jnp.where(
+        µ_new_default = jnp.where(
             jnp.abs(residual).max() > settings.κ * params.µ,
             params.µ,
             jnp.maximum(
@@ -534,6 +602,35 @@ def solve(
                 settings.µ_min,
             ),
         )
+
+        # Guard: with no inequalities the centering rule has nothing to
+        # track (S/Z are empty), so fall back to the default rule.
+        g_dim_local = vars.S.shape[-1]
+
+        def _mehrotra_µ() -> jnp.double:
+            """Centering µ update: ``µ_target = σ · mean(S·Z)``.
+
+            Clamped above by ``params.µ`` (non-increasing) and below by
+            ``max(µ_update_factor · µ, µ_min)`` so we don't shrink
+            faster than the legacy schedule in a single step.
+
+            σ defaults to 0.1; a full predictor-corrector would compute σ
+            from an affine fraction-to-boundary solve, which we skip in
+            favour of an always-on σ to avoid the extra factorisation.
+            """
+            sigma = settings.mehrotra_sigma
+            sz_mean = jnp.mean(vars.S * vars.Z)
+            µ_target = sigma * sz_mean
+            # Upper clamp: don't shrink µ by more than µ_update_factor
+            # in a single step. Lower clamp: µ_min.
+            lower = jnp.maximum(params.µ * settings.µ_update_factor, settings.µ_min)
+            upper = params.µ  # non-increasing
+            return jnp.clip(µ_target, lower, upper)
+
+        if settings.mehrotra_mu and g_dim_local > 0:
+            µ_new = _mehrotra_µ()
+        else:
+            µ_new = µ_new_default
 
         updated_params = Parameters(
             µ=µ_new,
@@ -565,6 +662,19 @@ def solve(
         new_iter_cost = jnp.where(nan_in_update, prev_iter_cost, new_iter_cost)
         last_improvement = prev_iter_cost - new_iter_cost
 
+        # Tighten the single-envelope filter to the smallest (θ, f) seen
+        # so far. On NaN keep the old envelope. Unused when filter mode
+        # is off (envelope stays at +inf).
+        if settings.use_filter_line_search:
+            theta_new, f_new = compute_theta_f(α)
+            theta_new = jnp.where(nan_in_update, filter_theta, theta_new)
+            f_new = jnp.where(nan_in_update, filter_f, f_new)
+            filter_theta_new = jnp.minimum(filter_theta, theta_new)
+            filter_f_new = jnp.minimum(filter_f, f_new)
+        else:
+            filter_theta_new = filter_theta
+            filter_f_new = filter_f
+
         return (
             updated_vars,
             updated_params,
@@ -572,6 +682,8 @@ def solve(
             iteration,
             new_iter_cost,
             last_improvement,
+            filter_theta_new,
+            filter_f_new,
         )
 
     def main_loop_continuation_criteria(
@@ -580,6 +692,8 @@ def solve(
             Parameters,
             KKTSystem,
             jnp.int32,
+            jnp.double,
+            jnp.double,
             jnp.double,
             jnp.double,
         ],
@@ -591,6 +705,8 @@ def solve(
             iteration,
             _last_iter_cost,
             last_improvement,
+            _filter_theta,
+            _filter_f,
         ) = inputs
 
         residual = jnp.concatenate(
@@ -609,15 +725,20 @@ def solve(
         )
         converged = jnp.sum(jnp.square(residual)) <= settings.residual_sq_threshold
 
-        # Auxiliary SQP-style termination: declared converged when both the
-        # cost improvement and the primal-residual squared norm are strictly
-        # below their thresholds. With both thresholds at their default of 0
-        # this never fires (no real value of either quantity is < 0), so the
-        # original KKT-residual criterion is the sole gate.
-        primal_violation = (
-            jnp.sum(jnp.square(kkt_system.rhs.Y_dyn))
-            + jnp.sum(jnp.square(kkt_system.rhs.Y_eq))
-            + jnp.sum(jnp.square(kkt_system.rhs.Z))
+        # Aux-gate primal violation: inf-norm of init/dyn defects,
+        # equality residuals, and positive-part inequality residuals.
+        # The inequality piece uses ``max(0, g) = max(0, rhs.Z - S)``
+        # (recovered without re-evaluating the inequality function) so
+        # the aux gate matches the benchmark's success-check exactly.
+        ineq_violation = jnp.max(
+            jnp.maximum(kkt_system.rhs.Z - vars.S, 0.0), initial=0.0
+        )
+        primal_violation = jnp.maximum(
+            jnp.max(jnp.abs(kkt_system.rhs.Y_dyn), initial=0.0),
+            jnp.maximum(
+                jnp.max(jnp.abs(kkt_system.rhs.Y_eq), initial=0.0),
+                ineq_violation,
+            ),
         )
         aux_converged = jnp.logical_and(
             last_improvement < settings.cost_improvement_threshold,
@@ -635,11 +756,13 @@ def solve(
     ).sum()
     (
         vars_out,
-        _unused_params,  # noqa: RUF059
+        final_params,
         _unused_kkt_system,
         iteration,
         _final_iter_cost,
         _final_improvement,
+        _final_filter_theta,
+        _final_filter_f,
     ) = jax.lax.while_loop(
         main_loop_continuation_criteria,
         main_loop_body,
@@ -650,9 +773,13 @@ def solve(
             0,
             init_iter_cost,
             jnp.array(jnp.inf, dtype=jnp.float64),
+            # Filter envelope initialized to +inf so the first iterate is
+            # unconditionally acceptable (no prior history to compare to).
+            jnp.array(jnp.inf, dtype=jnp.float64),
+            jnp.array(jnp.inf, dtype=jnp.float64),
         ),
     )
 
     no_errors = iteration < settings.max_iterations
 
-    return vars_out, iteration, no_errors
+    return vars_out, iteration, no_errors, final_params

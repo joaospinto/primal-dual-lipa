@@ -23,14 +23,13 @@ class SolverSettings:
 
     max_iterations: jnp.int32 = 500
     residual_sq_threshold: jnp.double = 1e-16
-    # Auxiliary termination criterion: declared converged when the cost
-    # improvement and the primal violation (sum of squared dynamics + equality
-    # + (g+s) inequality residuals) both fall strictly below their thresholds.
-    # Both default to 0, which disables this criterion (no real value of either
-    # quantity can be < 0). When enabled, LIPA terminates if EITHER this
-    # criterion or `residual_sq_threshold` is satisfied. Useful for matching
-    # SQP-style termination when the full KKT residual is dominated by η·J^T·c
-    # gradient terms that don't decay.
+    # Auxiliary SQP-style termination criterion: declared converged when
+    # the cost improvement and the primal violation (inf-norm of
+    # init/dyn defects, equality residuals, and positive-part inequality
+    # residuals) both fall strictly below their thresholds. Both default
+    # to 0, which disables this criterion (no real value of either is < 0).
+    # LIPA terminates if EITHER this criterion or `residual_sq_threshold`
+    # is satisfied.
     cost_improvement_threshold: jnp.double = 0.0
     primal_violation_threshold: jnp.double = 0.0
     α_min: jnp.double = 3e-6
@@ -44,7 +43,39 @@ class SolverSettings:
     µ_min: jnp.double = 1e-16
     τ_min: jnp.double = 0.995
     κ: jnp.double = 10.0
+    # Mehrotra-style centering µ update: when True, replace the default
+    # residual-gated rule with a complementarity-tracking rule
+    #
+    #     µ_target = σ · mean(S·Z)
+    #     µ_new    = clamp(µ_target,
+    #                      µ_update_factor · µ,    # lower clamp
+    #                      µ)                      # non-increasing
+    #
+    # Default False preserves the existing residual-gated rule.
+    mehrotra_mu: jnp.bool = field(default=False, metadata={"static": True})
+    # Centering parameter for the Mehrotra rule above. Lower σ is more
+    # "predictor-like" (faster complementarity tightening); higher σ is
+    # more "corrector-like" (more centered iterates). σ = 0.1 is the
+    # textbook conservative default. Only consulted when ``mehrotra_mu``
+    # is True.
+    mehrotra_sigma: jnp.double = 0.1
     armijo_factor: jnp.double = 1e-4
+    # Filter line-search (Wächter–Biegler 2006, Math. Prog. 106) —
+    # optional alternative to the merit-function Armijo line search.
+    # When enabled, a trial step is accepted if it improves EITHER the
+    # barrier-augmented objective f OR the primal-violation measure θ
+    # separately, rather than their merit-function combination. We
+    # maintain a single (θ, f) envelope as the "filter" (the
+    # Fletcher–Leyffer simplification), bounding the jitted while_loop
+    # carry. The Armijo check is ORed with the filter check, so the
+    # filter strictly accepts a superset of merit-Armijo alphas.
+    use_filter_line_search: jnp.bool = field(default=False, metadata={"static": True})
+    # Filter "wedge" margins: a trial point (θ_α, f_α) is acceptable iff
+    #   θ_α ≤ (1 − γ_θ) · θ_F  OR  f_α ≤ f_F − γ_f · θ_F
+    # for the current envelope (θ_F, f_F). Defaults follow the IPOPT
+    # paper §3.2 (Eqns. 18-19).
+    filter_gamma_theta: jnp.double = 1e-5
+    filter_gamma_f: jnp.double = 1e-5
     num_iterative_refinement_steps: jnp.int32 = 0
     num_parallel_line_search_steps: jnp.int32 = field(
         default=1, metadata={"static": True}

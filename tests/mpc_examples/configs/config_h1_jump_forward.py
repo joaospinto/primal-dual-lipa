@@ -244,10 +244,11 @@ lipa_settings = SolverSettings(
     η_update_factor=1.0,
     µ_update_factor=0.9,
     cost_improvement_threshold=1e-3,
-    primal_violation_threshold=1e-5,
+    primal_violation_threshold=1e-3,
     num_iterative_refinement_steps=2,
     use_parallel_lqr=False,
     num_parallel_line_search_steps=1,
+    mehrotra_mu=True,
 )
 
 lipa_settings_enforce = SolverSettings(
@@ -256,7 +257,8 @@ lipa_settings_enforce = SolverSettings(
     η_update_factor=2.0,
     µ_update_factor=0.9,
     cost_improvement_threshold=1e-3,
-    primal_violation_threshold=1e-5,
+    primal_violation_threshold=1e-3,
+    mehrotra_mu=True,
     num_iterative_refinement_steps=2,
     use_parallel_lqr=False,
     num_parallel_line_search_steps=1,

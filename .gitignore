@@ -211,3 +211,7 @@ jax_cache/
 
 # Generated MPC example videos — produced by `python -m tests.mpc_examples.run_offline --video ...`.
 mpc_videos/
+
+# Comparison benchmark output and scratch dirs
+comparison_results/
+tmp/

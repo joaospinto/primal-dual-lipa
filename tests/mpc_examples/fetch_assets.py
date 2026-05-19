@@ -29,7 +29,9 @@ import argparse
 import hashlib
 import os
 import shutil
+import subprocess
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -178,11 +180,39 @@ def _fetch_one(rel_path: str, source: Path | None, force: bool) -> bool:
             raise RuntimeError(msg)
         shutil.copyfile(src, dest)
     else:
-        url = GITHUB_BASE + rel_path
-        with urllib.request.urlopen(url) as resp, open(dest, "wb") as f:
-            shutil.copyfileobj(resp, f)
+        _download(GITHUB_BASE + rel_path, dest)
     _verify(rel_path, dest)
     return True
+
+
+def _download(url: str, dest: Path) -> None:
+    """Try urllib first, fall back to curl on SSL/network failure.
+
+    Python's ssl module enforces RFC 5280 strictly in 3.13+ (e.g.
+    rejects CA certs with non-critical Basic Constraints), and the
+    image's CA bundle often doesn't include corporate roots used by
+    TLS-intercepting proxies (Zscaler etc.). curl is typically more
+    lenient and uses the system trust store directly, so it succeeds
+    in environments where urllib chokes. Both succeed for everyone
+    else, in which case the fallback never fires.
+    """
+    urllib_err = None
+    try:
+        with urllib.request.urlopen(url) as resp, open(dest, "wb") as f:
+            shutil.copyfileobj(resp, f)
+        return
+    except (urllib.error.URLError, OSError) as e:
+        urllib_err = e
+    try:
+        subprocess.run(
+            ["curl", "-fsSL", "-o", str(dest), url],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as curl_err:
+        msg = f"Failed to download {url}\n  urllib: {urllib_err}\n  curl:   {curl_err}"
+        raise RuntimeError(msg) from curl_err
 
 
 def fetch(robots: list[str], force: bool = False) -> None:

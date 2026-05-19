@@ -304,27 +304,22 @@ lipa_settings = SolverSettings(
     η_update_factor=1.0,
     µ_update_factor=0.9,
     cost_improvement_threshold=1.0,
-    primal_violation_threshold=1.0,
+    primal_violation_threshold=1e-3,
     num_iterative_refinement_steps=2,
     use_parallel_lqr=False,
     num_parallel_line_search_steps=1,
 )
 
-# Single-phase IPM. With the lean cost weights (Qrot at 1e3 etc),
-# foot-tracking gated by contact, and the joint-velocity hard
-# inequalities, the IPM converges from the bare reference initial
-# guess in ~710 iterations to defect ~6e-8. The two-phase warmup
-# variant gives marginally fewer total iterations (~600) but its
-# warmup phase plateaus at a cap, which we'd rather avoid for a
-# clean "naturally terminated" run.
 lipa_settings_enforce = SolverSettings(
-    max_iterations=1000,
+    max_iterations=2000,
     η0=1e9,
     η_update_factor=1.5,
     µ_update_factor=0.9,
     cost_improvement_threshold=1.0,
-    primal_violation_threshold=1.0,
+    primal_violation_threshold=1e-3,
     num_iterative_refinement_steps=2,
     use_parallel_lqr=False,
     num_parallel_line_search_steps=1,
+    mehrotra_mu=True,
+    mehrotra_sigma=0.05,
 )

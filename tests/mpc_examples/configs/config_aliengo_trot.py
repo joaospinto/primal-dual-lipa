@@ -96,7 +96,8 @@ lipa_settings = SolverSettings(
     η_update_factor=1.0,
     µ_update_factor=0.9,
     cost_improvement_threshold=1e-3,
-    primal_violation_threshold=1e-5,
+    primal_violation_threshold=1e-3,
     use_parallel_lqr=False,
     num_parallel_line_search_steps=1,
+    mehrotra_mu=True,
 )

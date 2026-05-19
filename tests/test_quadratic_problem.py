@@ -63,7 +63,7 @@ class TestLqrSolve(unittest.TestCase):
         settings = SolverSettings(print_logs=True)
 
         print("Quadratic problem")  # noqa: T201
-        vars_out, iterations, no_errors = solve(
+        vars_out, iterations, no_errors, _ = solve(
             vars_in=vars_in,
             x0=x0,
             cost=cost,

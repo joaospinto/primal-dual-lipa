@@ -18,6 +18,39 @@ test = ["matplotlib"]
 lint = ["ruff"]
 mpc-examples = ["mujoco", "mujoco-mjx", "matplotlib", "imageio[ffmpeg]"]
 
+[dependency-groups]
+# Other-solver adapters used by the LIPA-vs-SOTA comparison driver in
+# tests/comparison/. aligator and acados are intentionally NOT listed here:
+# aligator's PyPI sdist is broken (it's a CMake project; install via
+# conda-forge), and acados requires a manual CMake build of the C library.
+# See tests/comparison/README.md. Each adapter degrades gracefully if its
+# solver is not importable.
+#
+# Note: we use CasADi's bundled IPOPT (i.e. `casadi.nlpsol('solver',
+# 'ipopt', nlp)`) rather than cyipopt because cyipopt requires a system
+# IPOPT install via pkg-config, which we don't necessarily have. CasADi
+# bundles IPOPT inside the wheel, so it Just Works.
+comparisons = [
+  "casadi",
+  # mim-solvers 0.2.0 is built against libpinocchio 3.8.0 — pin to match
+  # so the runtime linker finds the right SO version.
+  "pin==3.8.*",
+  "crocoddyl",
+  "mim-solvers",
+  "matplotlib",
+  "tabulate",
+  # sip_python — the SIP solver from the same author as LIPA. Wheel
+  # ships on PyPI (Linux/macOS/Windows, Python 3.10–3.13).
+  "sip-python>=0.0.4",
+  "cvxopt>=1.3.3",
+  # Google's Trajax is installed direct from git. The `trajax` name on
+  # PyPI is a DIFFERENT (unrelated MPPI/MPCC) library, so we use the
+  # PEP 508 direct-URL form to bypass PyPI resolution entirely
+  # (mirrors the regularized_lqr_jax line above). Pinned to a SHA so
+  # `uv sync` is reproducible — bump as needed.
+  "trajax @ git+https://github.com/google/trajax",
+]
+
 [tool.ruff]
 line-length = 88
 target-version = "py311"

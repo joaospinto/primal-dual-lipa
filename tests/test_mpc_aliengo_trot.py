@@ -30,8 +30,9 @@ class TestAliengoTrot(unittest.TestCase):
 
         self.assertTrue(stats["converged"], f"LIPA reported errors; stats={stats}")
         # Match the LIPA `primal_violation_threshold` configured in the
-        # config (1e-5, sum-of-squares).
-        self.assertLess(stats["final_dynamics_violation"], 1e-5)
+        # config (1e-3, inf-norm of raw primal residuals — MJX-class
+        # tolerance, see _mjx_base.py).
+        self.assertLess(stats["final_dynamics_violation"], 1e-3)
         self.assertLess(stats["final_objective"], 1e7)
 
 

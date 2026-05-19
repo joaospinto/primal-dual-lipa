@@ -99,7 +99,7 @@ def _lipa_solve_with_stats(
         Theta=jnp.empty(0, dtype=X_in.dtype),
     )
 
-    vars_out, iterations, no_errors = lipa_solve(
+    vars_out, iterations, no_errors, _ = lipa_solve(
         vars_in=vars_in,
         x0=x0,
         cost=lipa_cost,
@@ -118,7 +118,7 @@ def _default_settings():
         η_update_factor=1.0,
         µ_update_factor=0.9,
         cost_improvement_threshold=1e-3,
-        primal_violation_threshold=1e-5,
+        primal_violation_threshold=1e-6,
     )
     if on_gpu:
         return SolverSettings(
