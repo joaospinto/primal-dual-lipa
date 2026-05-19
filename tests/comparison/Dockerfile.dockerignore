@@ -1,0 +1,27 @@
+# Used by `docker build -f tests/comparison/Dockerfile .` (build context
+# is the repo root). Trims things that bloat the context or invalidate
+# layer caches without affecting the comparison.
+
+.venv
+.git
+.gitignore
+.ruff_cache
+.pytest_cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.python-version
+
+# Big media that the comparison doesn't need.
+*.mp4
+*.png
+mpc_videos
+cartpole_movie.mp4
+quadpend_movie.mp4
+cartpole_timelapse.png
+quadpend_timelapse.png
+
+# JAX persistent cache + previous comparison results — regenerated.
+jax_cache
+comparison_results
