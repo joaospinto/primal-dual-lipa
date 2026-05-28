@@ -1,0 +1,5 @@
+problem,solver,iterations,solve_time_ms,final_cost,eq_violation_inf,ineq_violation_inf,success,kkt_init_violation_inf,kkt_dyn_violation_inf,kkt_eq_violation_inf,kkt_ineq_violation_inf,kkt_dual_violation_inf,kkt_complementarity_inf,kkt_stationarity_inf,kkt_residual_inf,notes
+cartpole,csqp-casadi,115,3929.123752983287,66.8026223184551,4.173560417264355e-07,0.0,1,0.0,8.881784197001252e-16,4.173560417264355e-07,0.0,0.0,6.717582254807287e-10,32.33705627288141,32.33705627288141,
+acrobot,csqp-casadi,74,569.5306799607351,44.513285141204044,5.329070518200751e-15,0.0,1,0.0,5.329070518200751e-15,0.0,0.0,0.0,0.0,13.566773945767043,13.566773945767043,
+quadpendulum,csqp-casadi,1000,315738.48896694835,8.694281957669258,1.8174332225839862e-06,8.032970833460329e-05,0,0.0,1.8174332225839862e-06,7.08244929370494e-09,8.032970833460329e-05,0.0,0.00018764513429040124,6.858701344512016,6.858701344512016,
+quadpendulum_theta,csqp-casadi,0,0.0,nan,nan,nan,0,,,,,,,,,CSQP/Crocoddyl does not support cross-stage Theta (theta_dim=1)

@@ -34,6 +34,44 @@ Here are some ways in which we improve on these libraries:
 | Per-constraint $\rho$           | ❌       | ❌      | ✅   |
 | Consistent $\rho$ in LS and KKT | ✅       | ❌      | ✅   |
 
+## Benchmark vs. other OCP solvers
+
+The table below summarises iteration counts on a head-to-head benchmark against
+several widely-used trajectory-optimisation and NLP solvers, on a fixed set of
+analytical and MuJoCo-MJX OCPs. Each cell is `<iterations><status>`; raw CSVs
+with full KKT-residual breakdowns live under
+[`comparison_results.full_repeats/`](comparison_results.full_repeats/), and the
+sweep is reproducible via
+[`tests/comparison/run_full_with_repeats.sh`](tests/comparison/run_full_with_repeats.sh).
+
+| solver          | cartpole | acrobot | quadpendulum | quadpendulum_θ | barrel_roll | backflip | jump   | trot  |
+|-----------------|----------|---------|--------------|-----------------|-------------|----------|--------|-------|
+| acados          | 68✓      | 99✓     | 31✓          | n/a             | —           | —        | —      | —     |
+| aligator-casadi | 101✓     | 55✓     | 1000✗        | n/a             | —           | —        | —      | —     |
+| aligator-jax    | 114✓     | 55✓     | ⏱            | n/a             | —           | —        | —      | —     |
+| csqp-casadi     | 115✓     | 74✓     | 1000✗        | n/a             | —           | —        | —      | —     |
+| csqp-jax        | 113✓     | 74✓     | 1000✗        | n/a             | 200✗        | 200✗     | 400✗   | 212✗  |
+| fatrop-casadi   | 80✓      | 17✓     | 112✓         | n/a             | —           | —        | —      | —     |
+| fatrop-jax      | 99✓      | 17✓     | 112✓         | n/a             | ⏱           | ⏱        | ⏱      | 124✓  |
+| ipopt-casadi    | 33✓      | 21✓     | 65✓          | 103✓            | —           | —        | —      | —     |
+| ipopt-jax       | 46✓      | 21✓     | 163✓         | 82✓             | 388✗        | 211✗     | 285✗   | 117✓  |
+| **lipa-cpu**    | 82✓      | 108✓    | 81✓          | 143✓            | —           | —        | —      | —     |
+| **lipa-gpu**    | **84✓**  | **108✓**| **81✓**      | **143✓**        | **70✓**     | **476✓** | **223✓**| **29✓** |
+| sip-casadi      | 231✓     | 68✓     | 231✓         | 198✓            | —           | —        | —      | —     |
+| sip-jax         | 231✓     | 68✓     | 123✓         | 198✓            | 186✓        | ⏱        | ⏱      | 55✓   |
+| trajax          | 310✓     | 86✓     | 237✓         | n/a             | ⏱           | 196✓     | 1027✓  | ⏱     |
+
+**Legend**
+
+| marker          | meaning                                                                                              |
+|-----------------|------------------------------------------------------------------------------------------------------|
+| `<iters>✓`      | converged                                                                                            |
+| `<iters>✗`      | ran iterations and failed (iteration cap hit, divergence, etc.)                                      |
+| `⏱`             | subprocess hard-killed at the wall-clock cap (2400 s on MJX problems, 360 s on analytical problems)  |
+| `n/a`           | adapter refused the problem (this solver structurally does not support that problem class — typically `theta_dim > 0` in this benchmark) |
+| `—`             | the corresponding solver pass did not cover this (solver, problem) pair                              |
+
+
 ## Installation
 
 If you just want to try out the examples in this repository, we suggest

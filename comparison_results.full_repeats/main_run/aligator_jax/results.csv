@@ -1,0 +1,5 @@
+problem,solver,iterations,solve_time_ms,final_cost,eq_violation_inf,ineq_violation_inf,success,kkt_init_violation_inf,kkt_dyn_violation_inf,kkt_eq_violation_inf,kkt_ineq_violation_inf,kkt_dual_violation_inf,kkt_complementarity_inf,kkt_stationarity_inf,kkt_residual_inf,notes
+cartpole,aligator-jax,114,16403.756632003933,66.8026196873468,1.161757356982207e-09,4.263256414560601e-14,1,,,,,,,,,
+acrobot,aligator-jax,55,4988.905713078566,44.51328640318543,4.235518424877682e-08,0.0,1,,,,,,,,,
+quadpendulum,aligator-jax,0,360528.67680601776,nan,nan,nan,0,,,,,,,,,hard-killed after 360s (subprocess timeout)
+quadpendulum_theta,aligator-jax,0,0.0,nan,nan,nan,0,,,,,,,,,aligator does not support cross-stage Theta (theta_dim=1)

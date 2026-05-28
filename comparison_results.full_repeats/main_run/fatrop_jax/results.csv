@@ -1,0 +1,5 @@
+problem,solver,iterations,solve_time_ms,final_cost,eq_violation_inf,ineq_violation_inf,success,kkt_init_violation_inf,kkt_dyn_violation_inf,kkt_eq_violation_inf,kkt_ineq_violation_inf,kkt_dual_violation_inf,kkt_complementarity_inf,kkt_stationarity_inf,kkt_residual_inf,notes
+barrel_roll,fatrop-jax,0,2400400.2241370035,nan,nan,nan,0,,,,,,,,,hard-killed after 2400s (subprocess timeout)
+backflip,fatrop-jax,0,2400527.8767719865,nan,nan,nan,0,,,,,,,,,hard-killed after 2400s (subprocess timeout)
+jump,fatrop-jax,0,2400404.0202249307,nan,nan,nan,0,,,,,,,,,hard-killed after 2400s (subprocess timeout)
+trot,fatrop-jax,124,1494615.7689990941,31027.026959285984,3.0199592373492123e-06,1e-06,1,0.0,3.0199592373492123e-06,0.0,1e-06,0.0,66404870361428.58,7440.785411211933,66404870361428.58,RuntimeError: return_status='1'; 1

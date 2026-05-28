@@ -1,0 +1,5 @@
+problem,solver,iterations,solve_time_ms,final_cost,eq_violation_inf,ineq_violation_inf,success,kkt_init_violation_inf,kkt_dyn_violation_inf,kkt_eq_violation_inf,kkt_ineq_violation_inf,kkt_dual_violation_inf,kkt_complementarity_inf,kkt_stationarity_inf,kkt_residual_inf,notes
+cartpole,fatrop-jax,99,37155.03331203945,66.80261980110308,4.736744330102738e-11,0.0,1,0.0,4.736744330102738e-11,2.6469779620185813e-23,0.0,0.0,1.0646884778925625e-07,4.3074083189154067e-10,1.0646884778925625e-07,0
+acrobot,fatrop-jax,17,4265.279524959624,44.513285141362346,3.155609107352575e-11,0.0,1,0.0,3.155609107352575e-11,0.0,0.0,,,3.18698123447092e-11,3.18698123447092e-11,0
+quadpendulum,fatrop-jax,112,189990.77212100383,8.279483678304928,8.381739746710082e-12,0.0,1,0.0,8.381739746710082e-12,3.427836458413584e-21,0.0,0.0,1.0001150881199205e-07,3.447305895604158e-11,1.0001150881199205e-07,0
+quadpendulum_theta,fatrop-jax,0,0.0,nan,nan,nan,0,,,,,,,,,fatrop does not natively support cross-stage Theta (theta_dim=1)

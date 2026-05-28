@@ -1,0 +1,5 @@
+problem,solver,iterations,solve_time_ms,final_cost,eq_violation_inf,ineq_violation_inf,success,kkt_init_violation_inf,kkt_dyn_violation_inf,kkt_eq_violation_inf,kkt_ineq_violation_inf,kkt_dual_violation_inf,kkt_complementarity_inf,kkt_stationarity_inf,kkt_residual_inf,notes
+cartpole,aligator-casadi,101,1299.4870659895241,66.80261968734698,1.1617333761648752e-09,4.263256414560601e-14,1,,,,,,,,,
+acrobot,aligator-casadi,55,514.7628330159932,44.51328640318543,4.235518380468761e-08,0.0,1,,,,,,,,,
+quadpendulum,aligator-casadi,1000,154943.31299199257,22.446023564618464,0.01991628972433679,0.039833632006475383,0,,,,,,,,,
+quadpendulum_theta,aligator-casadi,0,0.0,nan,nan,nan,0,,,,,,,,,aligator does not support cross-stage Theta (theta_dim=1)
