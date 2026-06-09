@@ -248,6 +248,40 @@ def write_csv(results: Iterable[SolverResult], path: Path) -> None:
             w.writerow([*base, *kkt_cells, r.notes])
 
 
+def write_solution_archives(results: Iterable[SolverResult], out_dir: Path) -> None:
+    """Persist final solver iterates as one compressed NPZ per result.
+
+    This is intentionally separate from CSV/report generation so the default
+    benchmark artifacts stay lightweight. Missing iterates (for unsupported
+    pairs, hard kills, or adapters that did not return a trajectory) are skipped.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _clean(s: str) -> str:
+        return "".join(c if c.isalnum() or c in "._-" else "_" for c in s)
+
+    for r in results:
+        if r.X is None or r.U is None or r.Theta is None:
+            continue
+        path = out_dir / f"{_clean(r.problem_name)}__{_clean(r.solver_name)}.npz"
+        np.savez_compressed(
+            path,
+            X=np.asarray(r.X),
+            U=np.asarray(r.U),
+            Theta=np.asarray(r.Theta),
+            solver_name=np.asarray(r.solver_name),
+            problem_name=np.asarray(r.problem_name),
+            iterations=np.asarray(r.iterations),
+            solve_time_ms=np.asarray(r.solve_time_ms),
+            final_cost=np.asarray(r.final_cost),
+            eq_violation_inf=np.asarray(r.eq_violation_inf),
+            ineq_violation_inf=np.asarray(r.ineq_violation_inf),
+            success=np.asarray(r.success),
+            notes=np.asarray(r.notes),
+        )
+
+
 def render_convergence_plots(results: list[SolverResult], out_dir: Path) -> None:
     """One PNG per problem with cost / eq / ineq vs. iteration for each solver.
 

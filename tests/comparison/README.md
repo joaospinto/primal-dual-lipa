@@ -43,6 +43,18 @@ uv run python -m tests.comparison.run_benchmark \
 model-evaluation backends), and `--solver-kwargs-json` for arbitrary
 per-solver overrides.
 
+Pass `--save-solutions` to additionally write final solver iterates as
+compressed `.npz` files under `<out-dir>/solutions/`. These archives are
+kept separate from the CSV/report outputs so the default benchmark
+artifact stays small and table-oriented. MJX solution archives can be
+rendered later without re-solving:
+
+```bash
+uv run --extra mpc-examples python -m tests.comparison.render_solution_frames \
+    --solution comparison_results/solutions/backflip__lipa.npz \
+    --problem backflip --out backflip_frames.ppm --frames 6
+```
+
 `run_all.sh` orchestrates 6 passes that have to run in separate
 processes (Aligator and CSQP can't coexist in one process due to a
 pinocchio ABI conflict; analytical and MJX use disjoint solver sets;
@@ -60,6 +72,7 @@ sip_kkt_perm.py        # AMD-first KKT permutation for sip_python
 run_benchmark.py       # single-pass CLI
 run_all.sh             # 6-pass orchestrator (sets bit-stable XLA flags)
 report.py              # markdown table + CSV + loglog plots
+render_solution_frames.py # read saved MJX solutions and render frame strips
 merge_reports.py       # combine per-pass CSVs into one merged report
 install/               # one shell script per non-pip-installable solver
 Dockerfile             # CPU-only pinned environment

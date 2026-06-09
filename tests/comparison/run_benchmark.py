@@ -35,6 +35,7 @@ from tests.comparison.problems import all_problem_names, make_problem
 from tests.comparison.report import (
     render_convergence_plots,
     render_markdown,
+    write_solution_archives,
     write_csv,
 )
 
@@ -523,6 +524,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--out-dir", type=Path, default=Path("comparison_results"))
     parser.add_argument(
+        "--save-solutions",
+        action="store_true",
+        help="Persist final X/U/Theta iterates as compressed NPZ files under "
+        "<out-dir>/solutions/. This is opt-in because the CSV/report artifacts "
+        "are the stable lightweight benchmark output.",
+    )
+    parser.add_argument(
         "--label-suffix",
         type=str,
         default="",
@@ -633,11 +641,15 @@ def main(argv: list[str] | None = None) -> int:
     md = render_markdown(results)
     (args.out_dir / "report.md").write_text(md)
     write_csv(results, args.out_dir / "results.csv")
+    if args.save_solutions:
+        write_solution_archives(results, args.out_dir / "solutions")
     render_convergence_plots(results, args.out_dir / "plots")
 
     if verbose:
         print(f"\nWrote markdown -> {args.out_dir / 'report.md'}")
         print(f"Wrote CSV -> {args.out_dir / 'results.csv'}")
+        if args.save_solutions:
+            print(f"Wrote solution archives -> {args.out_dir / 'solutions'}/")
         print(f"Wrote plots -> {args.out_dir / 'plots'}/")
 
     # Exit nonzero if any solver reported failure (so CI-style consumers can detect).
