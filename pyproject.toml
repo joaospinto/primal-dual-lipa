@@ -5,7 +5,7 @@ requires-python = ">= 3.12"
 dependencies = [
   "jax[cpu]; platform_system != \"Linux\"",
   "jax[cuda12]; platform_system == \"Linux\"",
-  "regularized_lqr_jax @ git+https://github.com/joaospinto/regularized_lqr_jax@ae4429fb485da165b17fc9ec715ff70893e47ee1",
+  "regularized_lqr_jax @ git+https://github.com/joaospinto/regularized_lqr_jax@306c541ded6419ee9522ded9eec545014bd25b8f",
 ]
 authors = [
   {name = "Joao Sousa-Pinto", email = "joaospinto@gmail.com"},
