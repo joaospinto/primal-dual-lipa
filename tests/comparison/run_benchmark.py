@@ -19,14 +19,20 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import errno
 import json
 import os
 import pickle
+import pty
+import select
+import signal
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from timeit import default_timer as timer
+
+import numpy as np
 
 from tests.comparison.adapters import all_adapter_names, get_adapter
 from tests.comparison.known_timeouts import is_known_hard_kill
@@ -51,6 +57,9 @@ def _run_one_in_process(
     solver_verbose: bool = False,
     backend: str | None = None,
     extra_kwargs: dict | None = None,
+    problem_kwargs: dict | None = None,
+    metadata_overlay: dict | None = None,
+    initial_solution_npz: str | Path | None = None,
 ) -> SolverResult:
     """Build the problem, instantiate the adapter, call ``solve``, in-process.
 
@@ -60,7 +69,14 @@ def _run_one_in_process(
     if verbose:
         print(f"  -> {solver_name} on {problem_name} ...", flush=True)
     try:
-        problem = make_problem(problem_name)
+        problem = make_problem(problem_name, **(problem_kwargs or {}))
+        if metadata_overlay:
+            problem = dataclasses.replace(
+                problem,
+                metadata={**problem.metadata, **metadata_overlay},
+            )
+        if initial_solution_npz is not None:
+            problem = _apply_initial_solution_npz(problem, initial_solution_npz)
     except Exception as e:  # noqa: BLE001
         return make_failure_result(
             solver_name,
@@ -87,12 +103,15 @@ def _run_one_in_process(
     kwargs: dict = {"max_iter": effective_max_iter}
     if solver_name in {"ipopt-casadi", "ipopt-jax", "csqp", "aligator", "acados"}:
         kwargs["tol"] = tol
-    if solver_name in {"ipopt-casadi", "ipopt-jax"}:
+    if solver_name in {"ipopt-casadi", "ipopt-jax", "sip"}:
         kwargs["timeout_s"] = timeout_s
+    if solver_name in {"ipopt-casadi", "ipopt-jax"}:
         if solver_verbose:
             kwargs["print_level"] = 5
     if solver_name == "csqp" and solver_verbose:
         kwargs["with_callbacks"] = True
+    if solver_name == "sip" and solver_verbose:
+        kwargs["print_logs"] = True
     # Backend selector for adapters that have a backend knob (csqp,
     # aligator, sip). Other adapters either are CasADi-only (ipopt,
     # acados, fatrop, ipopt-mjx, fatrop-mjx) or JAX-only (lipa, sip-mjx,
@@ -103,7 +122,7 @@ def _run_one_in_process(
 
     # Free-form per-solver extras from --solver-kwargs-json. Used for
     # tuning sweeps where we want to drive adapter-specific parameters
-    # (e.g. ipopt_extra_options, sip_extra_settings, psd_reg_delta)
+    # (e.g. ipopt_extra_options, sip_extra_settings)
     # without burning a round-trip on the adapter's signature.
     if extra_kwargs:
         kwargs.update(extra_kwargs)
@@ -177,6 +196,52 @@ def _solver_root(solver_name: str) -> str:
     return solver_name.rsplit("-", 1)[0] if "-" in solver_name else solver_name
 
 
+def _apply_initial_solution_npz(problem, archive_path: str | Path):
+    """Replace a problem's warm start from a saved solution archive."""
+    path = Path(archive_path)
+    with np.load(path, allow_pickle=False) as data:
+        missing = [key for key in ("X", "U", "Theta") if key not in data]
+        if missing:
+            raise ValueError(f"{path} missing required arrays: {missing}")
+        X = np.asarray(data["X"])
+        U = np.asarray(data["U"])
+        Theta = np.asarray(data["Theta"])
+        warm_start = {
+            key.removeprefix("warm_start__"): np.asarray(data[key])
+            for key in data.files
+            if key.startswith("warm_start__")
+        }
+
+    expected = {
+        "X": problem.X_init.shape,
+        "U": problem.U_init.shape,
+        "Theta": problem.Theta_init.shape,
+    }
+    actual = {"X": X.shape, "U": U.shape, "Theta": Theta.shape}
+    mismatched = {
+        key: (actual[key], expected[key])
+        for key in expected
+        if actual[key] != expected[key]
+    }
+    if mismatched:
+        raise ValueError(f"{path} shape mismatch for {problem.name}: {mismatched}")
+
+    return dataclasses.replace(
+        problem,
+        X_init=X,
+        U_init=U,
+        Theta_init=Theta,
+        warm_start=warm_start or problem.warm_start,
+    )
+
+
+def _overlay_settings(base, overlay):
+    """Overlay partial dict settings while preserving structured settings values."""
+    if isinstance(base, dict) and isinstance(overlay, dict):
+        return {**base, **overlay}
+    return overlay
+
+
 def _build_warmup_spec(problem, solver_name):
     """Construct the Phase-1 ProblemSpec from a problem that opted into
     two-phase via ``metadata['<solver_root>_two_phase'] = True``.
@@ -206,7 +271,10 @@ def _build_warmup_spec(problem, solver_name):
     ]
     for warmup_key, main_key in swap_pairs:
         if warmup_key in new_metadata:
-            new_metadata[main_key] = new_metadata[warmup_key]
+            new_metadata[main_key] = _overlay_settings(
+                new_metadata.get(main_key),
+                new_metadata[warmup_key],
+            )
 
     return dataclasses.replace(
         problem,
@@ -228,14 +296,20 @@ def _solve_two_phase(adapter, problem, solver_name, verbose):
     if verbose:
         print("     [phase 1/2] warmup ...", flush=True)
     p1 = adapter.solve(warmup_spec)
-    if not p1.success or p1.X is None or p1.U is None:
+    if p1.X is None or p1.U is None:
         if verbose:
             print(
-                f"     [phase 1/2] failed; running single-phase: "
+                f"     [phase 1/2] exposed no iterate; running single-phase: "
                 f"{p1.notes or 'no iterate exposed'}",
                 flush=True,
             )
         return adapter.solve(problem)
+    if not p1.success and verbose:
+        print(
+            f"     [phase 1/2] did not meet final success gate; "
+            "continuing with exposed warm-start iterate ...",
+            flush=True,
+        )
     if verbose:
         print(
             f"     [phase 1/2] done in {p1.iterations} iters / "
@@ -243,7 +317,7 @@ def _solve_two_phase(adapter, problem, solver_name, verbose):
             flush=True,
         )
     # Carry Phase-1's iterate AND any adapter-specific extra state
-    # (multipliers, slacks — anything the adapter dumped via
+    # (multipliers, slacks, penalty arrays — anything the adapter dumped via
     # SolverResult.warm_start_out) into Phase 2.
     main_spec = dataclasses.replace(
         problem,
@@ -281,6 +355,29 @@ def _print_pair_outcome(result: SolverResult) -> None:
     )
 
 
+def _subprocess_env(problem_name: str) -> dict[str, str] | None:
+    """Mirror the benchmark scripts' stable XLA-CPU flag for MJX runs."""
+    if (
+        os.environ.get("JAX_PLATFORMS", "").lower() != "cpu"
+        or problem_name not in {"trot", "barrel_roll", "backflip", "jump"}
+    ):
+        return None
+
+    xla_flags = os.environ.get("XLA_FLAGS", "")
+    cpu_flag = "--xla_cpu_multi_thread_eigen=false"
+    needs_xla_flag = cpu_flag not in xla_flags.split()
+    needs_cache_disable = "JAX_COMPILATION_CACHE_DIR" not in os.environ
+    if not needs_xla_flag and not needs_cache_disable:
+        return None
+
+    child_env = os.environ.copy()
+    if needs_xla_flag:
+        child_env["XLA_FLAGS"] = f"{xla_flags} {cpu_flag}".strip()
+    if needs_cache_disable:
+        child_env["JAX_COMPILATION_CACHE_DIR"] = ""
+    return child_env
+
+
 def _run_one_via_subprocess(
     solver_name: str,
     problem_name: str,
@@ -293,14 +390,18 @@ def _run_one_via_subprocess(
     solver_verbose: bool = False,
     backend: str | None = None,
     extra_kwargs: dict | None = None,
+    log_dir: Path | None = None,
+    problem_kwargs: dict | None = None,
+    metadata_overlay: dict | None = None,
+    initial_solution_npz: str | Path | None = None,
 ) -> SolverResult:
     """Run one (solver, problem) pair in its own subprocess with a hard kill.
 
     Two-tier timeout philosophy:
       * ``timeout_s`` — passed to the adapter as a *soft* cap. Solvers
-        with native wall-time support (IPOPT, IPOPT-MJX) honor this and
-        return a clean ``SolverResult`` with a Maximum_CpuTime_Exceeded-
-        style status. Most solvers ignore it.
+        with native wall-time support (IPOPT, IPOPT-MJX, SIP) honor this
+        and return a clean ``SolverResult`` with a timeout-style status.
+        Most solvers ignore it.
       * ``hard_timeout_s`` — wall time we give the subprocess as a
         whole, including JIT compile + problem build + solver run. When
         exceeded the child is SIGKILLed and we synthesise a failure
@@ -349,37 +450,98 @@ def _run_one_via_subprocess(
         cmd += ["--backend", backend]
     if solver_verbose:
         cmd += ["--solver-verbose"]
+    if problem_kwargs:
+        cmd += ["--problem-kwargs-json", json.dumps(problem_kwargs)]
+    if metadata_overlay:
+        cmd += ["--metadata-json", json.dumps(metadata_overlay)]
+    if initial_solution_npz is not None:
+        cmd += ["--initial-solution-npz", str(initial_solution_npz)]
     if extra_kwargs:
         cmd += ["--solver-kwargs-json", json.dumps(extra_kwargs)]
 
+    if log_dir is None:
+        log_dir = Path(tempfile.gettempdir()) / "lipa_comparison_subprocess_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{out_pkl.stem}.log"
+    child_env = _subprocess_env(problem_name)
+
     start = timer()
-    try:
-        completed = subprocess.run(  # noqa: S603
+    master_fd, slave_fd = pty.openpty()
+    timed_out = False
+    completed_returncode: int | None = None
+    with log_path.open("wb") as log_f:
+        proc = subprocess.Popen(  # noqa: S603
             cmd,
-            timeout=hard_timeout_s,
-            check=False,
-            # Inherit stdout/stderr so the user sees solver logs in
-            # real time (the child runs with verbose=False, but a
-            # solver_verbose=True still routes its own logs to stderr).
+            stdin=subprocess.DEVNULL,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            start_new_session=True,
+            env=child_env,
         )
-        elapsed_ms = 1e3 * (timer() - start)
-    except subprocess.TimeoutExpired:
-        elapsed_ms = 1e3 * (timer() - start)
-        # subprocess.run already SIGKILLs on TimeoutExpired (Python 3.3+).
+        os.close(slave_fd)
+        try:
+            while True:
+                remaining = hard_timeout_s - (timer() - start)
+                if remaining <= 0.0:
+                    timed_out = True
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    break
+                rlist, _, _ = select.select([master_fd], [], [], min(0.25, remaining))
+                if master_fd in rlist:
+                    try:
+                        chunk = os.read(master_fd, 65536)
+                    except OSError as e:
+                        if e.errno != errno.EIO:
+                            raise
+                        chunk = b""
+                    if chunk:
+                        log_f.write(chunk)
+                        log_f.flush()
+                        if verbose:
+                            sys.stdout.buffer.write(chunk)
+                            sys.stdout.buffer.flush()
+                    elif proc.poll() is not None:
+                        break
+                if proc.poll() is not None:
+                    while True:
+                        rlist, _, _ = select.select([master_fd], [], [], 0.0)
+                        if master_fd not in rlist:
+                            break
+                        try:
+                            chunk = os.read(master_fd, 65536)
+                        except OSError as e:
+                            if e.errno != errno.EIO:
+                                raise
+                            break
+                        if not chunk:
+                            break
+                        log_f.write(chunk)
+                        log_f.flush()
+                        if verbose:
+                            sys.stdout.buffer.write(chunk)
+                            sys.stdout.buffer.flush()
+                    break
+            completed_returncode = proc.wait()
+        finally:
+            os.close(master_fd)
+    elapsed_ms = 1e3 * (timer() - start)
+    if timed_out:
         result = make_failure_result(
             solver_name,
             problem_name,
-            f"hard-killed after {hard_timeout_s:.0f}s (subprocess timeout)",
+            "hard-killed after "
+            f"{hard_timeout_s:.0f}s (subprocess timeout); log={log_path}",
             solve_time_ms=elapsed_ms,
         )
         if verbose:
             print(
                 f"     HARD-KILLED after {elapsed_ms:.0f}ms "
-                f"(budget {hard_timeout_s:.0f}s)",
+                f"(budget {hard_timeout_s:.0f}s, log={log_path})",
                 flush=True,
             )
         out_pkl.unlink(missing_ok=True)
         return result
+    completed = subprocess.CompletedProcess(cmd, completed_returncode)
 
     try:
         if completed.returncode != 0 or out_pkl.stat().st_size == 0:
@@ -387,7 +549,7 @@ def _run_one_via_subprocess(
                 solver_name,
                 problem_name,
                 f"subprocess exit={completed.returncode}; no result written "
-                f"(after {elapsed_ms:.0f}ms)",
+                f"(after {elapsed_ms:.0f}ms); log={log_path}",
                 solve_time_ms=elapsed_ms,
             )
         with out_pkl.open("rb") as f:
@@ -396,7 +558,7 @@ def _run_one_via_subprocess(
         return make_failure_result(
             solver_name,
             problem_name,
-            f"subprocess result unreadable: {type(e).__name__}: {e}",
+            f"subprocess result unreadable: {type(e).__name__}: {e}; log={log_path}",
             solve_time_ms=elapsed_ms,
         )
     finally:
@@ -419,6 +581,10 @@ def _run_one(
     solver_verbose: bool = False,
     backend: str | None = None,
     extra_kwargs: dict | None = None,
+    log_dir: Path | None = None,
+    problem_kwargs: dict | None = None,
+    metadata_overlay: dict | None = None,
+    initial_solution_npz: str | Path | None = None,
 ) -> SolverResult:
     """Dispatch to subprocess (with hard kill) or in-process."""
     if hard_timeout_s is not None:
@@ -433,6 +599,10 @@ def _run_one(
             solver_verbose=solver_verbose,
             backend=backend,
             extra_kwargs=extra_kwargs,
+            log_dir=log_dir,
+            problem_kwargs=problem_kwargs,
+            metadata_overlay=metadata_overlay,
+            initial_solution_npz=initial_solution_npz,
         )
     return _run_one_in_process(
         solver_name,
@@ -444,6 +614,9 @@ def _run_one(
         solver_verbose=solver_verbose,
         backend=backend,
         extra_kwargs=extra_kwargs,
+        problem_kwargs=problem_kwargs,
+        metadata_overlay=metadata_overlay,
+        initial_solution_npz=initial_solution_npz,
     )
 
 
@@ -451,6 +624,24 @@ def _parse_csv(s: str | None, default: list[str]) -> list[str]:
     if s is None:
         return default
     return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def _parse_json_arg(value: str | None, flag_name: str) -> dict:
+    if not value:
+        return {}
+    candidate = Path(value)
+    try:
+        if not value.lstrip().startswith(("{", "[")) and candidate.is_file():
+            decoded = json.loads(candidate.read_text())
+        else:
+            decoded = json.loads(value)
+    except (json.JSONDecodeError, OSError) as e:
+        raise ValueError(f"{flag_name} failed to parse: {e}") from e
+    if not isinstance(decoded, dict):
+        raise ValueError(
+            f"{flag_name} must decode to a dict, got {type(decoded).__name__}",
+        )
+    return decoded
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -474,7 +665,8 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=None,
         help="Soft per-solve wall-clock cap, passed to the adapter. "
-        "Only IPOPT / IPOPT-MJX honor it natively (via max_wall_time); "
+        "IPOPT / IPOPT-MJX honor it natively via max_wall_time; SIP "
+        "honors it via sip_python's internal time_limit_s; "
         "other adapters ignore it. Use --hard-timeout-s as a backstop.",
     )
     parser.add_argument(
@@ -515,12 +707,33 @@ def main(argv: list[str] | None = None) -> int:
         help="JSON dict (or path to a JSON file) of extra kwargs to "
         "forward to EVERY solver adapter constructor. Used by "
         "tuning sweeps to inject adapter-specific knobs like "
-        "ipopt_extra_options, sip_extra_settings, psd_reg_delta. "
+        "ipopt_extra_options or sip_extra_settings. "
         "Adapters that don't accept the kwarg will silently drop "
         "it via the existing TypeError fallback. Example: "
         "--solver-kwargs-json "
-        '\'{"psd_reg_delta": 0.01, "sip_extra_settings": '
-        '{"max_merit_callbacks": 30}}\'.',
+        '\'{"sip_extra_settings": {"line_search": {"max_iterations": 30}}}\'.',
+    )
+    parser.add_argument(
+        "--problem-kwargs-json",
+        type=str,
+        default=None,
+        help="JSON dict (or path to a JSON file) of extra kwargs forwarded "
+        "to every selected problem factory.",
+    )
+    parser.add_argument(
+        "--metadata-json",
+        type=str,
+        default=None,
+        help="JSON dict (or path to a JSON file) overlaid onto every selected "
+        "ProblemSpec.metadata after construction.",
+    )
+    parser.add_argument(
+        "--initial-solution-npz",
+        type=Path,
+        default=None,
+        help="Saved solution archive whose X/U/Theta arrays replace every "
+        "selected problem's primal warm start. Archives from --save-solutions "
+        "may also carry adapter warm-start state.",
     )
     parser.add_argument("--out-dir", type=Path, default=Path("comparison_results"))
     parser.add_argument(
@@ -555,32 +768,25 @@ def main(argv: list[str] | None = None) -> int:
     problems = _parse_csv(args.problems, all_problem_names())
     solvers = _parse_csv(args.solvers, all_adapter_names())
 
-    # Parse --solver-kwargs-json: accept either an inline JSON string or
-    # a path to a JSON file. Empty / unset -> no extras.
-    extra_kwargs: dict = {}
-    if args.solver_kwargs_json:
-        s = args.solver_kwargs_json
-        candidate = Path(s)
-        try:
-            if candidate.is_file():
-                extra_kwargs = json.loads(candidate.read_text())
-            else:
-                extra_kwargs = json.loads(s)
-        except (json.JSONDecodeError, OSError) as e:
-            print(
-                f"ERROR: --solver-kwargs-json failed to parse: {e}",
-                file=sys.stderr,
-            )
-            return 2
-        if not isinstance(extra_kwargs, dict):
-            print(
-                f"ERROR: --solver-kwargs-json must decode to a dict, got "
-                f"{type(extra_kwargs).__name__}",
-                file=sys.stderr,
-            )
-            return 2
-        if verbose:
-            print(f"Extra solver kwargs: {extra_kwargs}")
+    try:
+        extra_kwargs = _parse_json_arg(
+            args.solver_kwargs_json,
+            "--solver-kwargs-json",
+        )
+        problem_kwargs = _parse_json_arg(
+            args.problem_kwargs_json,
+            "--problem-kwargs-json",
+        )
+        metadata_overlay = _parse_json_arg(args.metadata_json, "--metadata-json")
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    if verbose and extra_kwargs:
+        print(f"Extra solver kwargs: {extra_kwargs}")
+    if verbose and problem_kwargs:
+        print(f"Extra problem kwargs: {problem_kwargs}")
+    if verbose and metadata_overlay:
+        print(f"Metadata overlay: {metadata_overlay}")
 
     if verbose:
         print(f"Problems: {problems}")
@@ -629,6 +835,10 @@ def main(argv: list[str] | None = None) -> int:
                 solver_verbose=args.solver_verbose,
                 backend=args.backend,
                 extra_kwargs=extra_kwargs,
+                log_dir=args.out_dir / "subprocess_logs",
+                problem_kwargs=problem_kwargs,
+                metadata_overlay=metadata_overlay,
+                initial_solution_npz=args.initial_solution_npz,
             )
             if args.label_suffix:
                 r = dataclasses.replace(

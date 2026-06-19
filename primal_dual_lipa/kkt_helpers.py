@@ -52,6 +52,13 @@ from primal_dual_lipa.types import (
     Variables,
 )
 
+def tree_all_finite(tree) -> jax.Array:
+    """Return whether all array leaves in a pytree are finite."""
+    result = jnp.array(True)
+    for leaf in jax.tree_util.tree_leaves(tree):
+        result = jnp.logical_and(result, jnp.all(jnp.isfinite(leaf)))
+    return result
+
 
 @partial(
     jax.jit,
@@ -129,27 +136,16 @@ def factor_kkt(
     use_parallel_lqr: bool,
 ) -> KKTFactorizationOutputs:
     """Factorize the Newton-KKT linear system."""
-    w = 1.0 / inputs.w_inv
-    reg_w_inv = 1.0 / (w + 1.0 / inputs.params.η_ineq)
-    bmm = jax.vmap(jnp.matmul)
     x_dim = inputs.D.shape[1]
-
-    P_2x2 = (
-        inputs.P
-        + bmm(inputs.E.mT, inputs.params.η_eq[..., None] * inputs.E)
-        + bmm(inputs.G.mT, reg_w_inv[..., None] * inputs.G)
-    )
-
-    Δ = jax.vmap(jnp.diag)(1.0 / inputs.params.η_dyn)
 
     factor_fn = factor_parallel if use_parallel_lqr else factor
     lqr_inputs = LQRFactorizationInputs(
         A=inputs.D[:, :, :x_dim],
         B=inputs.D[:, :, x_dim:],
-        Q=P_2x2[:, :x_dim, :x_dim],
-        M=P_2x2[:-1, :x_dim, x_dim:],
-        R=P_2x2[:-1, x_dim:, x_dim:],
-        Δ=Δ,
+        Q=inputs.P_lqr[:, :x_dim, :x_dim],
+        M=inputs.P_lqr[:-1, :x_dim, x_dim:],
+        R=inputs.P_lqr[:-1, x_dim:, x_dim:],
+        Δ_L=jax.vmap(jnp.diag)(jnp.sqrt(1.0 / inputs.params.η_dyn)),
     )
     lqr_outputs = factor_fn(lqr_inputs)
 
@@ -209,6 +205,33 @@ def factor_kkt(
         B_inv_C_Y_eq=sol.Y_eq,
         B_inv_C_Z=sol.Z,
     )
+
+
+def factorization_is_valid(
+    outputs: KKTFactorizationOutputs,
+    pd_tol: jnp.double = 0.0,
+    singular_tol: jnp.double = 0.0,
+) -> jax.Array:
+    """Check whether KKT factorization outputs are numerically usable."""
+    g_diag = jnp.diagonal(outputs.lqr_outputs.G_cho, axis1=-2, axis2=-1)
+    valid = jnp.logical_and(tree_all_finite(outputs), jnp.all(g_diag > pd_tol))
+    if hasattr(outputs.lqr_outputs, "S_cho"):
+        s_diag = jnp.diagonal(outputs.lqr_outputs.S_cho, axis1=-2, axis2=-1)
+        valid = jnp.logical_and(valid, jnp.all(s_diag > pd_tol))
+    else:
+        f_diag = jnp.abs(jnp.diagonal(outputs.lqr_outputs.F_lu, axis1=-2, axis2=-1))
+        valid = jnp.logical_and(valid, jnp.all(f_diag > singular_tol))
+
+    if outputs.schur_complement.shape[0] > 0:
+        schur_singular_values = jnp.linalg.svd(
+            outputs.schur_complement, compute_uv=False
+        )
+        valid = jnp.logical_and(
+            valid,
+            jnp.all(schur_singular_values > singular_tol),
+        )
+
+    return valid
 
 
 @partial(

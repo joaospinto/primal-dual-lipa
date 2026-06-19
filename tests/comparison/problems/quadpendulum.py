@@ -19,7 +19,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from primal_dual_lipa.types import SolverSettings
+from primal_dual_lipa.types import HessianRegularizationSettings, SolverSettings
 
 from tests.comparison.problem_spec import ProblemSpec
 
@@ -379,67 +379,80 @@ def make_problem(with_theta: bool = False) -> ProblemSpec:
     if with_theta:
         lipa_settings = SolverSettings(
             max_iterations=2000,
-            residual_sq_threshold=1e-8,
+            residual_sq_threshold=1e-9,
             η0=10.0,
             η_max=1e9,
             η_update_factor=1.15,
             µ0=0.01,
             µ_update_factor=0.9,
             µ_min=1e-16,
-            κ=500.0,
+            κ=300.0,
             num_iterative_refinement_steps=0,
             skip_line_search=True,
+            hessian_regularization=HessianRegularizationSettings(
+                increase_factor=4.0,
+                decrease_factor=0.25,
+            ),
             print_logs=False,
         )
     else:
         lipa_settings = SolverSettings(
             max_iterations=2000,
-            residual_sq_threshold=1e-8,
+            residual_sq_threshold=1e-9,
             η0=1.0,
             η_max=1e9,
-            η_update_factor=1.18,
+            η_update_factor=1.1,
             η_improvement_threshold=0.7,
             µ0=0.1,
             µ_update_factor=0.9,
             µ_min=1e-16,
-            κ=100.0,
+            κ=50.0,
             num_iterative_refinement_steps=0,
             skip_line_search=True,
+            hessian_regularization=HessianRegularizationSettings(
+                increase_factor=4.0,
+                decrease_factor=0.25,
+            ),
             print_logs=False,
         )
 
     if with_theta:
-        sip_settings = dict(
-            max_iterations=2000,
-            initial_penalty_parameter=10.0,
-            max_penalty_parameter=1e9,
-            penalty_parameter_increase_factor=1.3,
-            penalty_parameter_decrease_factor=0.9,
-            initial_mu=0.01,
-            mu_update_factor=0.85,
-            mu_min=1e-16,
-            mu_update_kappa=100.0,
-            num_iterative_refinement_steps=0,
-            skip_line_search=True,
-        )
-        _sip_jax_settings = dict()
+        sip_settings = {
+            "max_iterations": 2000,
+            "penalty": {
+                "initial_penalty_parameter": 10.0,
+                "max_penalty_parameter": 1e9,
+                "penalty_parameter_increase_factor": 1.3,
+                "penalty_parameter_decrease_factor": 0.9,
+            },
+            "barrier": {
+                "initial_mu": 0.01,
+                "mu_update_factor": 0.6,
+                "mu_min": 1e-16,
+                "mu_update_kappa": 100.0,
+            },
+            "num_iterative_refinement_steps": 0,
+            "line_search": {"skip_line_search": True},
+        }
+        _sip_jax_settings = {}
     else:
-        sip_settings = dict(
-            max_iterations=2000,
-            initial_penalty_parameter=1.0,
-            max_penalty_parameter=1e9,
-            penalty_parameter_increase_factor=1.18,
-            initial_mu=0.1,
-            mu_update_factor=0.9,
-            mu_min=1e-16,
-            mu_update_kappa=100.0,
-            num_iterative_refinement_steps=0,
-            skip_line_search=True,
-        )
-        _sip_jax_settings = dict(
-            penalty_parameter_increase_factor=1.10,
-            mu_update_factor=0.85,
-        )
+        sip_settings = {
+            "max_iterations": 2000,
+            "penalty": {
+                "initial_penalty_parameter": 1.0,
+                "max_penalty_parameter": 1e9,
+                "penalty_parameter_increase_factor": 1.35,
+            },
+            "barrier": {
+                "initial_mu": 0.01,
+                "mu_update_factor": 0.8,
+                "mu_min": 1e-16,
+                "mu_update_kappa": 100.0,
+            },
+            "num_iterative_refinement_steps": 0,
+            "line_search": {"skip_line_search": True},
+        }
+        _sip_jax_settings = {}
 
     return ProblemSpec(
         name=name,
@@ -462,7 +475,6 @@ def make_problem(with_theta: bool = False) -> ProblemSpec:
             "lipa_settings": lipa_settings,
             "sip_settings": sip_settings,
             "sip_jax_settings": _sip_jax_settings,
-            "sip_hessian_psd_mode": "kappa_shift",
             "aligator_casadi_settings": {
                 "mu_init": 0.01,
                 "max_al_iters": 2000,

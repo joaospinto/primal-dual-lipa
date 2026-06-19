@@ -118,16 +118,17 @@ def make_problem() -> ProblemSpec:
         metadata={
             "casadi_builder": _casadi_builder,
             "lipa_settings": SolverSettings(
-                η0=100.0,
-                η_update_factor=1.5,
-                skip_line_search=True,
+                use_filter_line_search=True,
                 print_logs=False,
             ),
-            "sip_settings": dict(
-                initial_penalty_parameter=100.0,
-                penalty_parameter_increase_factor=1.5,
-                skip_line_search=True,
-            ),
+            "sip_settings": {
+                "penalty": {
+                    "initial_penalty_parameter": 100.0,
+                    "penalty_parameter_increase_factor": 1.5,
+                },
+                "regularization": {"initial": 1e-3},
+                "line_search": {"skip_line_search": False},
+            },
             "acados_settings": {
                 "nlp_solver_type": "SQP",
                 "globalization": "FIXED_STEP",

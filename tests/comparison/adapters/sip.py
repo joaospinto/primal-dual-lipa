@@ -21,14 +21,9 @@ Two model-evaluation backends:
   symbolic graph. Wall-clock is typically several times faster than
   the JAX backend on the analytical suite.
 
-The CasADi backend supports ``hessian_mode="cost"`` only.
-
-Hessian modes:
-
-* ``"cost"`` (default): eigen-clamp ``hessian(f)``, take ``triu``.
-  Drops second-order constraint terms (Gauss-Newton-flavoured).
-* ``"lagrangian"``: include ``y^T hess(c) + z^T hess(g)``, symmetrize,
-  PSD-clamp, ``triu``.
+The adapter always supplies SIP with the Lagrangian Hessian. SIP's
+solver-side regularization handles indefiniteness; this adapter does
+not apply Schur/eigenvalue projection to the Hessian blocks.
 
 Conventions (from sip_python's tests/test_simple_constrained_lqr.py):
 
@@ -77,47 +72,6 @@ def _import_jax():
     return jax, jnp
 
 
-def _filter_zero_rows(c_fn, c_dim: int, x_dim: int, mock_zs: list):
-    """Detect rows of c that are identically zero across all probe inputs.
-
-    Used to drop trivially-zero equality rows (some problems pad
-    inactive stages with zeros). Such rows generate spurious dual
-    variables and inflate the KKT system; filtering them out leaves
-    only the constraints with actual content. Returns
-    ``(keep_mask, c_filtered)`` where ``c_filtered(z) = c(z)[keep_mask]``.
-
-    Probe inputs should be a list of dense ``z`` vectors; rows are
-    kept if any probe produces a non-zero entry.
-    """
-    import jax  # noqa: F401
-    import jax.numpy as jnp
-
-    if c_dim == 0:
-        return np.ones(0, dtype=bool), c_fn
-
-    keep = np.zeros(c_dim, dtype=bool)
-    c_jit = jax.jit(c_fn)
-    for z in mock_zs:
-        cz = np.asarray(c_jit(jnp.asarray(z)), dtype=np.float64)
-        keep = keep | (np.abs(cz) > 0.0)
-    # Also probe the Jacobian at the warm start — a row could happen
-    # to evaluate to 0 at a probe but have a non-zero derivative
-    # elsewhere (e.g. nonlinear constraint that only "lights up" at
-    # certain x). Take the union with rows that have non-zero
-    # gradient at any probe.
-    jac_jit = jax.jit(jax.jacrev(c_fn))
-    for z in mock_zs:
-        Jz = np.asarray(jac_jit(jnp.asarray(z)), dtype=np.float64)
-        keep = keep | (np.abs(Jz).sum(axis=1) > 0.0)
-
-    keep_indices = np.where(keep)[0]
-
-    def c_filtered(z):
-        return c_fn(z)[jnp.asarray(keep_indices)]
-
-    return keep, c_filtered
-
-
 def _slice_iterate(
     z_val: np.ndarray, problem: ProblemSpec
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -130,10 +84,206 @@ def _slice_iterate(
     return X, U, Theta
 
 
+def _initial_decision_vector(problem: ProblemSpec) -> np.ndarray:
+    X_init = np.asarray(problem.X_init, dtype=np.float64).copy()
+    return np.concatenate(
+        [
+            X_init.reshape(-1),
+            np.asarray(problem.U_init, dtype=np.float64).reshape(-1),
+            np.asarray(problem.Theta_init, dtype=np.float64).reshape(-1),
+        ]
+    )
+
+
 def _import_casadi():
     import casadi as ca  # local import so a missing CasADi only fails this backend
 
     return ca
+
+
+_ADAPTER_ONLY_SETTING_KEYS = frozenset({"time_limit_s"})
+
+
+def _merge_setting_dicts(*settings_dicts: dict) -> dict:
+    merged: dict = {}
+    for settings_dict in settings_dicts:
+        if not settings_dict:
+            continue
+        for key, value in settings_dict.items():
+            if (
+                isinstance(value, dict)
+                and isinstance(merged.get(key), dict)
+                and key not in _ADAPTER_ONLY_SETTING_KEYS
+            ):
+                merged[key] = _merge_setting_dicts(merged[key], value)
+            else:
+                merged[key] = value
+    return merged
+
+
+def _apply_sip_settings(settings, settings_dict: dict) -> None:
+    for key, value in settings_dict.items():
+        if key in _ADAPTER_ONLY_SETTING_KEYS:
+            continue
+        target = getattr(settings, key)
+        if isinstance(value, dict):
+            for attr, attr_value in value.items():
+                setattr(target, attr, attr_value)
+        else:
+            setattr(settings, key, value)
+
+
+def _custom_time_limit_s(*settings_dicts: dict) -> float:
+    time_limit_s = float("inf")
+    for settings_dict in settings_dicts:
+        if not settings_dict or "time_limit_s" not in settings_dict:
+            continue
+        value = settings_dict["time_limit_s"]
+        if value is None:
+            time_limit_s = float("inf")
+        else:
+            time_limit_s = float(value)
+        if time_limit_s < 0.0:
+            raise ValueError(f"time_limit_s must be nonnegative, got {value!r}")
+    return time_limit_s
+
+
+def _initialize_slacks_and_duals(
+    g_init: np.ndarray,
+    initial_mu: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return interior slack/dual guesses consistent with ``g(x) + s = 0``.
+
+    SIP models inequalities as ``g(x) + s = 0, s > 0, z > 0``. Starting
+    every slack at one is harmless for small toy constraints, but it can
+    create huge artificial infeasibility for MJX warm starts where inactive
+    constraints often have large negative margins. Match the primal residual
+    whenever possible and choose ``z`` on the initial central path.
+    """
+    if g_init.size == 0:
+        return np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.float64)
+    mu = max(float(initial_mu), 1e-16)
+    floor = max(mu, 1e-8)
+    s_init = np.maximum(-np.asarray(g_init, dtype=np.float64), floor)
+    z_init = mu / s_init
+    return s_init, z_init
+
+
+def _strictly_positive_warm_start(
+    warm_start: np.ndarray | None,
+    *,
+    floor: float,
+) -> np.ndarray | None:
+    if warm_start is None:
+        return None
+    arr = np.asarray(warm_start, dtype=np.float64)
+    if not np.all(np.isfinite(arr)):
+        return None
+    return np.maximum(arr, floor)
+
+
+def _warm_start_vector(warm_start: dict, key: str, size: int) -> np.ndarray | None:
+    value = warm_start.get(key)
+    if value is None:
+        return None
+    arr = np.asarray(value, dtype=np.float64).reshape(-1)
+    if arr.size != size or not np.all(np.isfinite(arr)):
+        return None
+    return arr
+
+
+def _initialize_eq_multipliers_from_warm_start(
+    warm_start: dict,
+    *,
+    n: int,
+    T: int,
+    eq_dim: int,
+) -> np.ndarray:
+    """Return SIP-internal equality multipliers from a warm-start dict.
+
+    ``Y_init`` and flattened ``Y_dyn`` use the canonical benchmark
+    convention: init residual ``X[0] - x0`` and dynamics residual
+    ``dyn(x, u) - X[1:]``. SIP's internal dynamics equality is the
+    opposite sign, ``X[1:] - dyn(x, u)``, hence the sign flip.
+
+    For compatibility with LIPA caches, also accept ``Y_dyn`` with
+    ``(T + 1) * n`` entries. In that layout row 0 is LIPA's internal
+    initial multiplier, so the canonical init multiplier is ``-row0``.
+    """
+    y_full = np.zeros(n + T * n + (T + 1) * eq_dim, dtype=np.float64)
+
+    y_init_init = _warm_start_vector(warm_start, "Y_init", n)
+    y_dyn_value = warm_start.get("Y_dyn")
+    if y_dyn_value is not None:
+        y_dyn_arr = np.asarray(y_dyn_value, dtype=np.float64).reshape(-1)
+        if y_dyn_arr.size == T * n and np.all(np.isfinite(y_dyn_arr)):
+            y_full[n : n + T * n] = -y_dyn_arr
+        elif y_dyn_arr.size == (T + 1) * n and np.all(np.isfinite(y_dyn_arr)):
+            if y_init_init is None:
+                y_full[:n] = -y_dyn_arr[:n]
+            y_full[n : n + T * n] = -y_dyn_arr[n:]
+    if y_init_init is not None:
+        y_full[:n] = y_init_init
+
+    if eq_dim > 0:
+        y_eq_init = _warm_start_vector(
+            warm_start,
+            "Y_eq",
+            (T + 1) * eq_dim,
+        )
+        if y_eq_init is not None:
+            y_full[n + T * n :] = y_eq_init
+    return y_full
+
+
+def _make_warm_start_out(
+    *,
+    multipliers_eq_full: np.ndarray | None,
+    multipliers_ineq_full: np.ndarray | None,
+    slacks_full: np.ndarray | None,
+    n: int,
+    T: int,
+    eq_dim: int,
+) -> dict | None:
+    warm_start_out: dict[str, np.ndarray] = {}
+    dyn_size = T * n
+    dyn_start = n
+    dyn_stop = dyn_start + dyn_size
+    if multipliers_eq_full is not None and multipliers_eq_full.size >= n:
+        warm_start_out["Y_init"] = np.asarray(
+            multipliers_eq_full[:n],
+            dtype=np.float64,
+        ).copy()
+    if multipliers_eq_full is not None and multipliers_eq_full.size >= dyn_stop:
+        warm_start_out["Y_dyn"] = np.asarray(
+            multipliers_eq_full[dyn_start:dyn_stop],
+            dtype=np.float64,
+        ).copy()
+        eq_size = (T + 1) * eq_dim
+        if eq_size > 0 and multipliers_eq_full.size - dyn_stop == eq_size:
+            warm_start_out["Y_eq"] = np.asarray(
+                multipliers_eq_full[dyn_stop:],
+                dtype=np.float64,
+            ).copy()
+    if slacks_full is not None:
+        warm_start_out["S"] = np.asarray(slacks_full, dtype=np.float64).copy()
+    if multipliers_ineq_full is not None:
+        warm_start_out["Z"] = np.asarray(
+            multipliers_ineq_full,
+            dtype=np.float64,
+        ).copy()
+    return warm_start_out or None
+
+
+def _sip_status_notes(output) -> str:
+    try:
+        return (
+            f"{output.exit_status}; "
+            f"sip_primal={float(output.max_primal_violation):.3e}; "
+            f"sip_dual={float(output.max_dual_violation):.3e}"
+        )
+    except Exception:  # noqa: BLE001
+        return str(output.exit_status)
 
 
 def _build_casadi_nlp(problem: ProblemSpec):
@@ -144,11 +294,7 @@ def _build_casadi_nlp(problem: ProblemSpec):
 
     * ``f_fn(z)``       — scalar cost ``casadi.Function``
     * ``c_fn(z)``       — equality residual ``casadi.Function``
-                          (init defect + dynamics defects + non-None
-                          eq rows). Already filtered: stages where
-                          ``casadi_builder`` returns ``eq=None`` are
-                          omitted entirely (analogous to the JAX
-                          backend's ``_filter_zero_rows`` step).
+                          (init defect + dynamics defects + non-None eq rows).
     * ``g_fn(z)``       — inequality residual ``casadi.Function``,
                           convention ``g <= 0`` (only stages where
                           ``casadi_builder`` returns a non-None
@@ -156,40 +302,16 @@ def _build_casadi_nlp(problem: ProblemSpec):
     * ``grad_f_fn(z)``  — gradient of f, dense (n_z,) output.
     * ``jac_c_fn(z)``   — Jacobian of c, CasADi-sparse.
     * ``jac_g_fn(z)``   — Jacobian of g, CasADi-sparse.
-    * ``stage_hess_meta`` — list of per-stage cost-Hessian descriptors.
-                          Each entry is a dict ``{"fn", "z_idx",
-                          "block_size", "sparsity"}`` where ``fn`` is a
-                          ``casadi.Function`` taking the block's
-                          flattened input ``[x_t; (u_t if t < T);
-                          theta]`` and returning the dense (small)
-                          per-stage Hessian wrt that vector. ``z_idx``
-                          gives the indices in the global ``z`` for
-                          writing the PSD-projected block back to the
-                          upper-triangle sparse buffer; ``sparsity`` is
-                          the CasADi symbolic sparsity of the block
-                          (used to size the global Hessian template).
+    * ``hess_lag_fn(z, y, z_mult)`` — Lagrangian Hessian function with
+                          CasADi-sparse output.
     * ``y_dim``, ``s_dim``, ``x_dim`` — dimensions.
     * ``jac_c_sparsity`` / ``jac_g_sparsity`` — symbolic CasADi
                           sparsity patterns (used to build the
                           ``scipy.sparse`` template buffers).
-    * ``upp_hess_pat`` — (x_dim, x_dim) sparse boolean upper-triangle
-                          pattern: union of per-stage block symbolic
-                          nonzeros ∪ the diagonal of every block's
-                          z-index scope. Used to size the sparse
-                          Hessian template handed to sip_python.
 
     The decision vector layout matches the JAX path exactly:
     ``z = [vec(X) (n*(T+1)), vec(U) (m*T), Theta (td)]``.
-
-    Per-stage cost Hessian extraction is the key optimisation that
-    lets the CasADi backend scale to large x_dim: the global Hessian
-    is block-diagonal (plus an arrow from the cross-stage ``theta``
-    if any), so the eigen-clamp factorises across stage blocks of
-    size at most (n+m+theta_dim) x (n+m+theta_dim) instead of doing
-    a single O(x_dim^3) eigh.
     """
-    from scipy import sparse as sp
-
     ca = _import_casadi()
     casadi_builder = problem.metadata["casadi_builder"]
 
@@ -217,64 +339,11 @@ def _build_casadi_nlp(problem: ProblemSpec):
     f_total = ca.SX(0.0)
     c_pieces = []  # init defect + dyn defects + non-None eq rows
     g_pieces = []  # non-None ineq rows
-    # Per-stage Hessian metadata: list of (stage_hess_fn, idx_array)
-    # where idx_array is the array of z-indices for the stage's inputs
-    # (X[:, t] then U[:, t] then optional Theta). At terminal stages
-    # U is omitted (no u arg).
-    stage_hess_meta = []
 
     # Initial-state defect (always present).
     c_pieces.append(X_sx[:, 0] - ca.DM(np.asarray(problem.x0)))
 
-    # Helper to compute z-indices for a stage's inputs.
-    def _stage_indices(t: int, include_u: bool) -> np.ndarray:
-        # X[:, t] occupies z[t*n : (t+1)*n]
-        idx = list(range(t * n, (t + 1) * n))
-        if include_u and t < T:
-            # U[:, t] occupies z[nx + t*m : nx + (t+1)*m]
-            idx.extend(range(nx + t * m, nx + (t + 1) * m))
-        if td > 0:
-            idx.extend(range(nx + nu, nx + nu + td))
-        return np.asarray(idx, dtype=np.intp)
-
     for t in range(T + 1):
-        # Per-stage cost: re-build the stage in isolated SX symbols so we
-        # can take its Hessian w.r.t. just (x_t, u_t, theta) without the
-        # global graph. This is the "split symbolic" trick that keeps the
-        # per-stage Hessian Function small.
-        include_u = t < T
-        x_local = ca.SX.sym(f"xs_{t}", n)
-        u_local = ca.SX.sym(f"us_{t}", m) if include_u else ca.SX.zeros(m, 1)
-        theta_local = ca.SX.sym(f"th_{t}", max(td, 1))
-        theta_local_arg = theta_local[:td] if td > 0 else ca.SX.zeros(0)
-        stage_local = casadi_builder(x_local, u_local, theta_local_arg, t)
-        f_local = stage_local["f"]
-        # Hessian variables for this stage block. Order: x_t, [u_t,] theta.
-        # Matches _stage_indices() ordering above.
-        hess_vars = [x_local]
-        if include_u:
-            hess_vars.append(u_local)
-        if td > 0:
-            hess_vars.append(theta_local_arg)
-        xu_local = ca.vertcat(*hess_vars)
-        H_local, _ = ca.hessian(f_local, xu_local)
-        # Build the per-stage Hessian Function. Input is the same
-        # variables; output is the (block_size, block_size) dense matrix.
-        # We want the Function to take a single flat input matching the
-        # global z slice — this lets per-call dispatch be a single
-        # ``np.ndarray`` slice + Function call rather than a build-up.
-        fn_name = f"sip_stage_hess_{t}"
-        # Use the same xu_local as the Function input.
-        stage_hess_fn = ca.Function(fn_name, [xu_local], [H_local])
-        stage_hess_meta.append(
-            {
-                "fn": stage_hess_fn,
-                "z_idx": _stage_indices(t, include_u),
-                "block_size": xu_local.numel(),
-                "sparsity": H_local.sparsity(),
-            }
-        )
-        # ---- Global-graph pieces (cost, c, g, jacobians) ---------------------
         u_t = U_sx[:, t] if t < T else ca.SX.zeros(m, 1)
         stage = casadi_builder(X_sx[:, t], u_t, theta_arg, t)
         f_total = f_total + stage["f"]
@@ -298,46 +367,36 @@ def _build_casadi_nlp(problem: ProblemSpec):
     jac_c = ca.jacobian(c_expr, z) if y_dim > 0 else ca.SX.zeros(0, x_dim)
     jac_g = ca.jacobian(g_expr, z) if s_dim > 0 else ca.SX.zeros(0, x_dim)
 
+    y_sym = ca.SX.sym("Y", y_dim) if y_dim > 0 else ca.SX.zeros(0, 1)
+    z_sym = ca.SX.sym("Z", s_dim) if s_dim > 0 else ca.SX.zeros(0, 1)
+    lag_expr = f_total
+    if y_dim > 0:
+        lag_expr = lag_expr + ca.dot(y_sym, c_expr)
+    if s_dim > 0:
+        lag_expr = lag_expr + ca.dot(z_sym, g_expr)
+    H_lag, _ = ca.hessian(lag_expr, z)
+
     f_fn = ca.Function("sip_cost_val", [z], [f_total], ["z"], ["f"])
     c_fn = ca.Function("sip_eq_val", [z], [c_expr], ["z"], ["c"])
     g_fn = ca.Function("sip_ineq_val", [z], [g_expr], ["z"], ["g"])
     grad_f_fn = ca.Function("sip_cost_grad", [z], [grad_f], ["z"], ["grad_f"])
     jac_c_fn = ca.Function("sip_eq_jac", [z], [jac_c], ["z"], ["jac_c"])
     jac_g_fn = ca.Function("sip_ineq_jac", [z], [jac_g], ["z"], ["jac_g"])
-
-    # Build the (x_dim, x_dim) upper-triangle sparsity pattern as the
-    # union of (a) each per-stage block's symbolic sparsity, mapped from
-    # block-local (i, j) to global (z_idx[i], z_idx[j]), and (b) the
-    # diagonal (the eigen-clamp may add k*I to every block, which lights
-    # up every diagonal entry within a block's z_idx scope — strictly
-    # speaking we only need diagonal entries that some stage covers, but
-    # adding the full diagonal is cheap and avoids edge cases).
-    #
-    # Using the symbolic per-stage nnz (vs the full block) keeps the
-    # global Hessian template close to truly minimal.
-    upp_hess_pat = sp.lil_matrix((x_dim, x_dim), dtype=bool)
-    for meta in stage_hess_meta:
-        idx = meta["z_idx"]
-        sp_block = meta["sparsity"]
-        # CasADi sparsity: iterate (row, col) of structurally non-zero
-        # entries. Use sparsity.row() / sparsity.colind() (CSC).
-        col_ind = np.asarray(sp_block.colind(), dtype=np.intp)
-        row_ind = np.asarray(sp_block.row(), dtype=np.intp)
-        for j in range(sp_block.size2()):  # local cols
-            for k in range(col_ind[j], col_ind[j + 1]):
-                i = row_ind[k]  # local row
-                gi = int(idx[i])
-                gj = int(idx[j])
-                if gi <= gj:  # upper triangle
-                    upp_hess_pat[gi, gj] = True
-                else:
-                    upp_hess_pat[gj, gi] = True  # mirror to upper triangle
-        # Also mark the diagonal entries the block can populate via
-        # k*I clamp (every variable in z_idx may get a k*I bump).
-        for i in idx:
-            upp_hess_pat[i, i] = True
-    upp_hess_pat = upp_hess_pat.tocsc()
-    upp_hess_pat = upp_hess_pat.astype(np.float64) != 0
+    hess_lag_inputs = [z]
+    hess_lag_input_names = ["z"]
+    if y_dim > 0:
+        hess_lag_inputs.append(y_sym)
+        hess_lag_input_names.append("y")
+    if s_dim > 0:
+        hess_lag_inputs.append(z_sym)
+        hess_lag_input_names.append("z_mult")
+    hess_lag_fn = ca.Function(
+        "sip_lagrangian_hess",
+        hess_lag_inputs,
+        [H_lag],
+        hess_lag_input_names,
+        ["H"],
+    )
 
     return {
         "f_fn": f_fn,
@@ -346,8 +405,8 @@ def _build_casadi_nlp(problem: ProblemSpec):
         "grad_f_fn": grad_f_fn,
         "jac_c_fn": jac_c_fn,
         "jac_g_fn": jac_g_fn,
-        "stage_hess_meta": stage_hess_meta,
-        "upp_hess_pat": upp_hess_pat,
+        "hess_lag_fn": hess_lag_fn,
+        "hess_lag_sparsity": H_lag.sparsity(),
         "x_dim": x_dim,
         "y_dim": y_dim,
         "s_dim": s_dim,
@@ -365,16 +424,6 @@ class SipAdapter(SolverAdapter):
         self,
         max_iter: int = 1000,
         tol: float = 1e-6,
-        # PSD-projection floor for the cost Hessian. Matches sip_python's
-        # test default. Larger values trade convergence speed for
-        # robustness on hard nonconvex sub-problems.
-        psd_reg_delta: float = 1e-6,
-        # Elastic mode lets the solver soften inequalities by absorbing
-        # infeasibility into an L1-penalised slack. Off by default: the
-        # dynamics defects in our OCPs are stiff equalities that elastic
-        # relaxation would silently corrupt.
-        enable_elastics: bool = False,
-        elastic_var_cost_coeff: float = 1e6,
         # Default penalty / barrier ramp. Per-problem overrides via
         # problem.metadata["sip_settings"] dial in different schedules
         # for problems whose defaults don't converge.
@@ -382,26 +431,8 @@ class SipAdapter(SolverAdapter):
         mu_update_factor: float = 0.9,
         initial_mu: float = 1e-1,
         initial_penalty_parameter: float = 1.0,
-        # Hessian mode: "lagrangian" (full y^T hess(c) + z^T hess(g) +
-        # hess(f), PSD-projected) or "cost" (just hess(f) PSD-projected,
-        # matching the sip_python test convention).
-        hessian_mode: str = "cost",
-        # PSD-projection scheme for per-stage Hessian blocks (JAX
-        # backend only; CasADi backend always uses "kappa_shift"):
-        # * "schur" — LIPA's Schur-complement scheme via
-        #   ``block_schur_psd_projection``; guarantees global PD when
-        #   theta is present at the cost of more aggressive eigenvalue
-        #   re-shaping.
-        # * "eig_clip" — V @ max(S, delta) @ V.T eigenvalue clip via
-        #   ``project_psd_cone``. Flattens negative eigenvalues to
-        #   delta; the legacy JAX-backend default for td=0.
-        # * "kappa_shift" — Q + max(-s_min, 0) * I + delta * I; the
-        #   CasADi backend's scheme. Preserves the eigenvector basis
-        #   and only shifts the spectrum, which converges faster on
-        #   problems where the Hessian basis is informative even when
-        #   nearly singular.
-        hessian_psd_mode: str = "schur",
         print_logs: bool = False,
+        timeout_s: float | None = None,
         sip_extra_settings: Optional[dict] = None,
         # Backend for per-iter model evaluations. "casadi" reuses the
         # problem's casadi_builder (same one IPOPT / acados / fatrop /
@@ -413,38 +444,18 @@ class SipAdapter(SolverAdapter):
     ) -> None:
         self.max_iter = max_iter
         self.tol = tol
-        self.psd_reg_delta = float(psd_reg_delta)
-        self.enable_elastics = bool(enable_elastics)
-        self.elastic_var_cost_coeff = float(elastic_var_cost_coeff)
         self.penalty_parameter_increase_factor = float(
             penalty_parameter_increase_factor
         )
         self.mu_update_factor = float(mu_update_factor)
         self.initial_mu = float(initial_mu)
         self.initial_penalty_parameter = float(initial_penalty_parameter)
-        self.hessian_mode = str(hessian_mode)
-        if self.hessian_mode not in ("lagrangian", "cost"):
-            raise ValueError(
-                f"hessian_mode must be 'lagrangian' or 'cost', got {hessian_mode!r}",
-            )
-        self.hessian_psd_mode = str(hessian_psd_mode)
-        if self.hessian_psd_mode not in ("schur", "eig_clip", "kappa_shift"):
-            raise ValueError(
-                "hessian_psd_mode must be one of 'schur', 'eig_clip', "
-                f"'kappa_shift'; got {hessian_psd_mode!r}",
-            )
         self.print_logs = bool(print_logs)
+        self.timeout_s = None if timeout_s is None else float(timeout_s)
         self.sip_extra_settings = sip_extra_settings or {}
         if backend not in {"jax", "casadi"}:
             raise ValueError(f"backend must be 'jax' or 'casadi', got {backend!r}")
         self.backend = backend
-        if backend == "casadi" and self.hessian_mode != "cost":
-            # The CasADi backend currently only implements the cost-only
-            # Hessian PSD-projection path.
-            raise ValueError(
-                "backend='casadi' currently only supports hessian_mode='cost'; "
-                f"got hessian_mode={self.hessian_mode!r}",
-            )
 
     def is_available(self) -> tuple[bool, str]:
         try:
@@ -496,7 +507,10 @@ class SipAdapter(SolverAdapter):
 
         return self._solve_jax_per_stage(problem)
 
-    def _solve_jax_per_stage(self, problem: ProblemSpec) -> SolverResult:  # noqa: PLR0915, PLR0912
+    def _solve_jax_per_stage(
+        self,
+        problem: ProblemSpec,
+    ) -> SolverResult:  # noqa: PLR0915, PLR0912
         """JAX backend with per-stage Jacobian / Hessian assembly.
 
         Replaces the original ``_solve`` body that did global
@@ -508,18 +522,12 @@ class SipAdapter(SolverAdapter):
         so it works on every problem class (analytical + MJX, with or
         without theta and user equalities).
 
-        Hessian PSD-projection per stage uses LIPA's Schur-complement
-        scheme (``primal_dual_lipa.kkt_builder.block_schur_psd_projection``)
-        when ``theta_dim > 0``, otherwise plain per-block eigh. The
-        Schur scheme guarantees the assembled global Hessian is
-        positive definite even after theta-coupling rows are summed
-        across stages; per-block eigh + scatter-add would only give PSD.
+        Hessian callbacks return the symmetrized Lagrangian Hessian blocks.
+        SIP's solver-side inertia correction handles any regularization.
         """
         sip = _import_sip()
         jax, jnp = _import_jax()
         from scipy import sparse as sp
-        from primal_dual_lipa.kkt_builder import block_schur_psd_projection
-        from regularized_lqr_jax.helpers import project_psd_cone
 
         T, n, m = problem.T, problem.n, problem.m
         td = problem.theta_dim
@@ -536,24 +544,11 @@ class SipAdapter(SolverAdapter):
         eq_dim_user = problem.eq_dim if has_user_eq else 0
         ineq_dim = problem.ineq_dim if has_ineq else 0
 
-        # FULL equality stack: init(n) + dyn(T*n) + user_eq((T+1)*eq_dim_user).
-        # We filter zero rows (problems like cartpole/quadpendulum pad the
-        # inner user-eq stages with jnp.where-zeros so eq() returns
-        # structurally-zero rows for t < T) — the filtered y_dim / s_dim
-        # are computed below after the row-keep mask is built.
+        # Equality stack: init(n) + dyn(T*n) + user_eq((T+1)*eq_dim_user).
         c_full_dim = n + T * n + (T + 1) * eq_dim_user
         g_full_dim = (T + 1) * ineq_dim
 
         x0_const = jnp.asarray(problem.x0)
-        psd_delta = self.psd_reg_delta
-        is_cost_mode = self.hessian_mode == "cost"
-        # MJX problems need the Lagrangian Hessian (multiplier
-        # contributions matter for stiff contact constraints);
-        # cost-only Hessian gives a non-stationary local minimum.
-        # Mirror the historical sip_mjx adapter's always-Lagrangian
-        # behaviour.
-        if problem.metadata.get("is_mjx") and is_cost_mode:
-            is_cost_mode = False
 
         def _slice_xut(z):
             X = z[:nx].reshape(T + 1, n)
@@ -662,61 +657,8 @@ class SipAdapter(SolverAdapter):
                     [inner_ineq.reshape(-1), term_ineq.reshape(-1)],
                 )
 
-        # ===== Row-keep mask: filter out structurally-zero rows =====
-        # Problems whose equality function pads inner stages with
-        # ``jnp.where(t == T, ..., zeros)`` produce structurally-zero c
-        # rows that, if handed to sip, make its KKT system singular (the
-        # corresponding dual variables are unbounded). Same for ineq with
-        # constant trivially-satisfied rows whose Jacobian is zero.
-        # Probe at warm-start + perturbations to determine which rows
-        # are structurally active. y_dim / s_dim shrink accordingly.
-        z_init_np = np.concatenate(
-            [
-                np.asarray(problem.X_init, dtype=np.float64).reshape(-1),
-                np.asarray(problem.U_init, dtype=np.float64).reshape(-1),
-                np.asarray(problem.Theta_init, dtype=np.float64).reshape(-1),
-            ]
-        )
-        _rng = np.random.default_rng(0)
-        probe_zs_np = [
-            z_init_np,
-            z_init_np + 0.01 * _rng.standard_normal(z_init_np.shape),
-            z_init_np + 0.1 * _rng.standard_normal(z_init_np.shape),
-        ]
-        if td > 0:
-            # Force a non-zero theta probe so theta-dependent rows aren't
-            # missed when Theta_init defaults to zero.
-            z_theta_probe = z_init_np.copy()
-            z_theta_probe[nx + nu : nx + nu + td] = 0.1
-            probe_zs_np.append(z_theta_probe)
-        probe_zs = [jnp.asarray(z, dtype=jnp.float64) for z in probe_zs_np]
-        keep_mask_eq, c_fn_filtered = _filter_zero_rows(
-            c_fn,
-            c_full_dim,
-            x_dim,
-            probe_zs,
-        )
-        if has_ineq:
-            keep_mask_ineq, g_fn_filtered = _filter_zero_rows(
-                g_fn,
-                g_full_dim,
-                x_dim,
-                probe_zs,
-            )
-        else:
-            keep_mask_ineq = np.zeros(0, dtype=bool)
-            g_fn_filtered = None
-        y_dim = int(keep_mask_eq.sum())
-        s_dim = int(keep_mask_ineq.sum())
-
-        # Build full→filtered row index map (used for sparsity template +
-        # multiplier scatter). Rows that were filtered out get -1 so any
-        # bug that uses them is easy to spot.
-        full_to_filtered_eq = np.full(c_full_dim, -1, dtype=np.int64)
-        full_to_filtered_eq[keep_mask_eq] = np.arange(y_dim)
-        full_to_filtered_ineq = np.full(g_full_dim, -1, dtype=np.int64)
-        if has_ineq:
-            full_to_filtered_ineq[keep_mask_ineq] = np.arange(s_dim)
+        y_dim = c_full_dim
+        s_dim = g_full_dim if has_ineq else 0
 
         # ===== Per-stage Jacobian builders =====
         # All produce per-stage blocks of shape (..., out_dim, n+m+td) for
@@ -817,62 +759,14 @@ class SipAdapter(SolverAdapter):
                 return jax.jacrev(_f)(_terminal_input(X[T], theta))
 
         # ===== Per-stage Hessian builders =====
-        # PSD-project per stage. The scheme is controlled by the
-        # ``sip_hessian_psd_mode`` problem-metadata key (falls back to
-        # ``self.hessian_psd_mode``); see the SipAdapter docstring for
-        # the per-mode tradeoffs:
-        # * "schur" — LIPA's Schur-complement scheme (when theta is
-        #   present) falling back to eigenvalue-clip via
-        #   ``project_psd_cone`` for theta-free stages.
-        # * "eig_clip" — eigenvalue-clip everywhere (V @ max(S, delta)
-        #   @ V.T).
-        # * "kappa_shift" — Q + max(-s_min, 0) * I + delta * I.
-        #   Preserves eigenvector basis; matches the CasADi backend.
-        psd_mode = problem.metadata.get("sip_hessian_psd_mode", self.hessian_psd_mode)
-        if psd_mode not in ("schur", "eig_clip", "kappa_shift"):
-            raise ValueError(
-                "sip_hessian_psd_mode must be 'schur' / 'eig_clip' / "
-                f"'kappa_shift'; got {psd_mode!r}"
-            )
-
-        def _kappa_shift(H):
-            S = jnp.linalg.eigvalsh(0.5 * (H + H.T))
-            shift = jnp.maximum(-S[0], 0.0) + psd_delta
-            return H + shift * jnp.eye(H.shape[0], dtype=H.dtype)
-
-        if psd_mode == "schur":
-
-            def _psd_project_inner(H):
-                if td > 0:
-                    return block_schur_psd_projection(H, dims=(td, m, n), eps=psd_delta)
-                return project_psd_cone(H, delta=psd_delta)
-
-            def _psd_project_terminal(H):
-                if td > 0:
-                    return block_schur_psd_projection(H, dims=(td, n), eps=psd_delta)
-                return project_psd_cone(H, delta=psd_delta)
-
-        elif psd_mode == "eig_clip":
-
-            def _psd_project_inner(H):
-                return project_psd_cone(H, delta=psd_delta)
-
-            def _psd_project_terminal(H):
-                return project_psd_cone(H, delta=psd_delta)
-
-        else:  # kappa_shift
-
-            def _psd_project_inner(H):
-                return _kappa_shift(H)
-
-            def _psd_project_terminal(H):
-                return _kappa_shift(H)
+        def _symmetrize(H):
+            return 0.5 * (H + H.T)
 
         @jax.jit
         def inner_hess_blocks(z, y, zd):
             X, U, theta = _slice_xut(z)
             ts = jnp.arange(T)
-            # Multiplier slices (only consulted in lagrangian mode).
+            # Multiplier slices for the Lagrangian Hessian.
             Y_dyn = y[n : n + T * n].reshape(T, n)
             if has_user_eq:
                 Y_eq_inner = y[n + T * n : n + T * n + T * eq_dim_user].reshape(
@@ -894,8 +788,6 @@ class SipAdapter(SolverAdapter):
                         if td > 0
                         else jnp.zeros(0, dtype=xut.dtype)
                     )
-                    if is_cost_mode:
-                        return stage_cost(xx, uu, thth, t)
                     # Lagrangian = cost - y_dyn·dyn (sign matches c's
                     # X[t+1] - dyn convention) + y_eq·eq + z_ineq·ineq.
                     terms = stage_cost(xx, uu, thth, t) - jnp.dot(
@@ -924,7 +816,7 @@ class SipAdapter(SolverAdapter):
                 Y_eq_inner,
                 Z_inner,
             )
-            return jax.vmap(_psd_project_inner)(blocks)
+            return jax.vmap(_symmetrize)(blocks)
 
         @jax.jit
         def terminal_hess_block(z, y, zd):
@@ -941,8 +833,6 @@ class SipAdapter(SolverAdapter):
             def L_xt(xt):
                 xx = xt[:n]
                 thth = xt[n : n + td] if td > 0 else jnp.zeros(0, dtype=xt.dtype)
-                if is_cost_mode:
-                    return terminal_cost(xx, thth)
                 terms = terminal_cost(xx, thth)
                 if has_user_eq:
                     terms = terms + jnp.dot(
@@ -957,7 +847,7 @@ class SipAdapter(SolverAdapter):
                 return terms
 
             H = jax.hessian(L_xt)(_terminal_input(X[T], theta))
-            return _psd_project_terminal(H)
+            return _symmetrize(H)
 
         # ===== Sparsity templates (hand-assembled) =====
         # Column layout of z = [X (n*(T+1)), U (m*T), Theta (td)].
@@ -1034,28 +924,12 @@ class SipAdapter(SolverAdapter):
                     for j in range(td):
                         c_rows.append(row_off + i)
                         c_cols.append(_theta_col(j))
-        # c_rows / c_cols are in the FULL row indexing (size c_full_dim).
-        # Build c_entry_keep mask (per natural-order entry: True if this
-        # entry's full-row is kept by the active-row filter). Use it to
-        # both build the filtered sparsity template and to filter the
-        # per-iter c_vals before scattering.
-        c_rows_full_arr = np.asarray(c_rows, dtype=np.int64)
-        c_cols_full_arr = np.asarray(c_cols, dtype=np.int32)
-        c_entry_keep = keep_mask_eq[c_rows_full_arr]
-        c_rows_filtered_arr = full_to_filtered_eq[c_rows_full_arr[c_entry_keep]].astype(
-            np.int32
-        )
-        c_cols_filtered_arr = c_cols_full_arr[c_entry_keep]
-        # Keep both names around: c_rows_arr / c_cols_arr for the
-        # per-iter writeback (it indexes into the FULL c_vals natural
-        # order); the *_filtered_arr versions are what goes into the
-        # sparse template.
-        c_rows_arr = c_rows_full_arr.astype(np.int32)
-        c_cols_arr = c_cols_full_arr
+        c_rows_arr = np.asarray(c_rows, dtype=np.int32)
+        c_cols_arr = np.asarray(c_cols, dtype=np.int32)
         jac_c_template = sp.csr_matrix(
             (
-                np.ones(c_rows_filtered_arr.shape[0], dtype=np.float64),
-                (c_rows_filtered_arr, c_cols_filtered_arr),
+                np.ones(c_rows_arr.shape[0], dtype=np.float64),
+                (c_rows_arr, c_cols_arr),
             ),
             shape=(y_dim, x_dim),
         )
@@ -1096,28 +970,18 @@ class SipAdapter(SolverAdapter):
                     for j in range(td):
                         g_rows.append(row_off + i)
                         g_cols.append(_theta_col(j))
-            g_rows_full_arr = np.asarray(g_rows, dtype=np.int64)
-            g_cols_full_arr = np.asarray(g_cols, dtype=np.int32)
-            g_entry_keep = keep_mask_ineq[g_rows_full_arr]
-            g_rows_filtered_arr = full_to_filtered_ineq[
-                g_rows_full_arr[g_entry_keep]
-            ].astype(np.int32)
-            g_cols_filtered_arr = g_cols_full_arr[g_entry_keep]
-            g_rows_arr = g_rows_full_arr.astype(np.int32)
-            g_cols_arr = g_cols_full_arr
+            g_rows_arr = np.asarray(g_rows, dtype=np.int32)
+            g_cols_arr = np.asarray(g_cols, dtype=np.int32)
             jac_g_template = sp.csr_matrix(
                 (
-                    np.ones(g_rows_filtered_arr.shape[0], dtype=np.float64),
-                    (g_rows_filtered_arr, g_cols_filtered_arr),
+                    np.ones(g_rows_arr.shape[0], dtype=np.float64),
+                    (g_rows_arr, g_cols_arr),
                 ),
                 shape=(s_dim, x_dim),
             )
         else:
             g_rows_arr = np.zeros(0, dtype=np.int32)
             g_cols_arr = np.zeros(0, dtype=np.int32)
-            g_entry_keep = np.zeros(0, dtype=bool)
-            g_rows_filtered_arr = np.zeros(0, dtype=np.int32)
-            g_cols_filtered_arr = np.zeros(0, dtype=np.int32)
             jac_g_template = sp.csr_matrix((s_dim, x_dim))
 
         # --- Lagrangian Hessian upper triangle (block-diagonal in stages,
@@ -1224,20 +1088,16 @@ class SipAdapter(SolverAdapter):
                 target[k] = _slot(int(rows[k]), int(cols[k]))
             return target
 
-        # c_target / g_target use the FILTERED arrays — they point into the
-        # filtered sparse template's data slots. At per-iter time we
-        # assemble c_vals over the FULL natural order then filter via
-        # c_entry_keep before scattering through c_target.
         c_target = _csr_perm_with_duplicates(
-            c_rows_filtered_arr,
-            c_cols_filtered_arr,
+            c_rows_arr,
+            c_cols_arr,
             jac_c_template,
         )
         h_target = _csr_perm_with_duplicates(h_rows_arr, h_cols_arr, upp_hess_template)
         if has_ineq:
             g_target = _csr_perm_with_duplicates(
-                g_rows_filtered_arr,
-                g_cols_filtered_arr,
+                g_rows_arr,
+                g_cols_arr,
                 jac_g_template,
             )
         else:
@@ -1290,36 +1150,37 @@ class SipAdapter(SolverAdapter):
         # numerics paths need different schedules.
         problem_overrides = dict(problem.metadata.get("sip_settings", {}))
         backend_key = f"sip_{self.backend}_settings"
-        problem_overrides.update(problem.metadata.get(backend_key, {}))
+        problem_overrides = _merge_setting_dicts(
+            problem_overrides,
+            problem.metadata.get(backend_key, {}),
+        )
+        time_limit_s = _custom_time_limit_s(
+            {"time_limit_s": self.timeout_s},
+            problem_overrides,
+            self.sip_extra_settings,
+        )
         ss = sip.Settings()
         ss.max_iterations = int(self.max_iter)
-        ss.max_kkt_violation = float(self._effective_tol)
-        ss.enable_elastics = self.enable_elastics
-        if self.enable_elastics:
-            ss.elastic_var_cost_coeff = self.elastic_var_cost_coeff
-        ss.penalty_parameter_increase_factor = self.penalty_parameter_increase_factor
-        ss.mu_update_factor = self.mu_update_factor
-        ss.initial_mu = self.initial_mu
-        ss.initial_penalty_parameter = self.initial_penalty_parameter
-        ss.print_logs = self.print_logs
+        ss.termination.max_dual_residual = float(self._effective_tol)
+        ss.termination.max_constraint_violation = float(self._effective_tol)
+        ss.termination.max_complementarity_gap = float(self._effective_tol)
+        ss.penalty.penalty_parameter_increase_factor = (
+            self.penalty_parameter_increase_factor
+        )
+        ss.barrier.mu_update_factor = self.mu_update_factor
+        ss.barrier.initial_mu = self.initial_mu
+        ss.penalty.initial_penalty_parameter = self.initial_penalty_parameter
+        ss.logging.print_logs = self.print_logs
         if not self.print_logs:
-            ss.print_line_search_logs = False
-            ss.print_search_direction_logs = False
-            ss.print_derivative_check_logs = False
+            ss.logging.print_line_search_logs = False
+            ss.logging.print_search_direction_logs = False
+            ss.logging.print_derivative_check_logs = False
         ss.assert_checks_pass = False
-        for k, v in problem_overrides.items():
-            setattr(ss, k, v)
-        for k, v in self.sip_extra_settings.items():
-            setattr(ss, k, v)
+        _apply_sip_settings(ss, problem_overrides)
+        _apply_sip_settings(ss, self.sip_extra_settings)
 
         # ===== Warm start =====
-        z_init = np.concatenate(
-            [
-                np.asarray(problem.X_init, dtype=np.float64).reshape(-1),
-                np.asarray(problem.U_init, dtype=np.float64).reshape(-1),
-                np.asarray(problem.Theta_init, dtype=np.float64).reshape(-1),
-            ]
-        )
+        z_init = _initial_decision_vector(problem)
 
         # ===== Per-iter recording =====
         iter_xut: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
@@ -1330,13 +1191,12 @@ class SipAdapter(SolverAdapter):
             z_jax = jnp.asarray(mci.x, dtype=jnp.float64)
             z_np_iter = np.asarray(mci.x, dtype=np.float64).copy()
             Xi, Ui, Ti = _slice_iterate(z_np_iter, problem)
-            iter_xut.append((Xi, Ui, Ti))
 
             # Scalar / vector primitives.
             mco.f = float(np.asarray(f_fn(z_jax)))
-            mco.c = np.asarray(c_fn_filtered(z_jax), dtype=np.float64).copy()
+            mco.c = np.asarray(c_fn(z_jax), dtype=np.float64).copy()
             if has_ineq:
-                mco.g = np.asarray(g_fn_filtered(z_jax), dtype=np.float64).copy()
+                mco.g = np.asarray(g_fn(z_jax), dtype=np.float64).copy()
             else:
                 mco.g = np.zeros(0, dtype=np.float64)
             mco.gradient_f = np.asarray(
@@ -1399,9 +1259,7 @@ class SipAdapter(SolverAdapter):
                     ].reshape(-1)
                     idx += eq_dim_user * td
             jac_c_buf.data[:] = 0.0
-            # c_vals is in natural FULL order; filter to active entries
-            # before scattering through the filtered template's data slots.
-            np.add.at(jac_c_buf.data, c_target, c_vals[c_entry_keep])
+            np.add.at(jac_c_buf.data, c_target, c_vals)
             mco.jacobian_c = jac_c_buf
 
             # ----- g-Jacobian (per-stage ineq + terminal) -----
@@ -1436,26 +1294,21 @@ class SipAdapter(SolverAdapter):
                     ].reshape(-1)
                     idx += ineq_dim * td
                 jac_g_buf.data[:] = 0.0
-                np.add.at(jac_g_buf.data, g_target, g_vals[g_entry_keep])
+                np.add.at(jac_g_buf.data, g_target, g_vals)
                 mco.jacobian_g = jac_g_buf
             else:
                 mco.jacobian_g = jac_g_buf
 
             # ----- Lagrangian Hessian (per-stage PSD-projected blocks) -----
-            # SIP gives us multipliers in the FILTERED layout (mci.y has
-            # size y_dim). The Hessian builders index multipliers by FULL
-            # row layout (so per-stage Y_dyn / Y_eq_inner slices line up
-            # with all-T-stage vmaps). Scatter mci.y / mci.z back into
-            # full vectors first.
-            y_full = np.zeros(c_full_dim, dtype=np.float64)
-            y_full[keep_mask_eq] = np.asarray(mci.y, dtype=np.float64)
+            y_full = np.asarray(mci.y, dtype=np.float64)
             y_jax = jnp.asarray(y_full, dtype=jnp.float64)
             if has_ineq:
-                zd_full = np.zeros(g_full_dim, dtype=np.float64)
-                zd_full[keep_mask_ineq] = np.asarray(mci.z, dtype=np.float64)
+                zd_full = np.asarray(mci.z, dtype=np.float64)
                 zd_jax = jnp.asarray(zd_full, dtype=jnp.float64)
             else:
+                zd_full = np.zeros(0, dtype=np.float64)
                 zd_jax = jnp.zeros(0, dtype=jnp.float64)
+            iter_xut.append((Xi, Ui, Ti))
             inner_blocks = np.asarray(
                 inner_hess_blocks(z_jax, y_jax, zd_jax),
                 dtype=np.float64,
@@ -1511,40 +1364,74 @@ class SipAdapter(SolverAdapter):
             return nx + nu + (local_idx - n)
 
         # ===== Construct solver =====
-        solver = sip.Solver(ss, qs, pd, mc)
+        solver = sip.Solver(ss, qs, pd, mc, time_limit_s)
 
         vars_in = sip.Variables(pd)
         vars_in.x[:] = z_init
-        vars_in.s[:] = 1.0
+        if has_ineq:
+            g_init = np.asarray(
+                g_fn(jnp.asarray(z_init, dtype=jnp.float64)),
+                dtype=np.float64,
+            )
+        else:
+            g_init = np.zeros(0, dtype=np.float64)
+        s_init, zd_init = _initialize_slacks_and_duals(
+            g_init,
+            ss.barrier.initial_mu,
+        )
+        vars_in.s[:] = s_init
+        vars_in.z[:] = zd_init
         vars_in.y[:] = 0.0
-        vars_in.e[:] = 0.0
-        vars_in.z[:] = 1.0
+        warm_start = problem.warm_start or {}
+        y_full_init = _initialize_eq_multipliers_from_warm_start(
+            warm_start,
+            n=n,
+            T=T,
+            eq_dim=eq_dim_user,
+        )
+        if np.any(y_full_init):
+            vars_in.y[:] = y_full_init
+        if has_ineq:
+            s_warm = _warm_start_vector(warm_start, "S", g_full_dim)
+            z_dual_warm = _warm_start_vector(warm_start, "Z", g_full_dim)
+            warm_floor = max(
+                float(ss.barrier.initial_mu),
+                1e-8,
+            )
+            s_warm = _strictly_positive_warm_start(
+                s_warm,
+                floor=warm_floor,
+            )
+            z_dual_warm = _strictly_positive_warm_start(
+                z_dual_warm,
+                floor=warm_floor,
+            )
+            if s_warm is not None:
+                vars_in.s[:] = s_warm
+            if z_dual_warm is not None:
+                vars_in.z[:] = z_dual_warm
 
         # ===== Warm up JIT caches on z_init =====
         try:
-            z_warm = jnp.asarray(z_init, dtype=jnp.float64)
-            # Hessian builders index multipliers in the FULL row layout,
-            # so warm-up vectors must match c_full_dim / g_full_dim, not
-            # the filtered y_dim / s_dim that sip sees.
-            y_warm = jnp.zeros(c_full_dim, dtype=jnp.float64)
-            zd_warm = (
-                jnp.ones(g_full_dim, dtype=jnp.float64)
-                if has_ineq
-                else jnp.zeros(0, dtype=jnp.float64)
-            )
-            jax.block_until_ready(f_fn(z_warm))
-            jax.block_until_ready(grad_f_fn(z_warm))
-            jax.block_until_ready(c_fn(z_warm))
-            jax.block_until_ready(dyn_jac_blocks(z_warm))
-            if has_user_eq:
-                jax.block_until_ready(user_eq_jac_inner_blocks(z_warm))
-                jax.block_until_ready(user_eq_jac_terminal(z_warm))
+            z_flat_warm = jnp.asarray(z_init, dtype=jnp.float64)
+            y_warm = jnp.asarray(y_full_init, dtype=jnp.float64)
             if has_ineq:
-                jax.block_until_ready(g_fn(z_warm))
-                jax.block_until_ready(ineq_jac_inner_blocks(z_warm))
-                jax.block_until_ready(ineq_jac_terminal(z_warm))
-            jax.block_until_ready(inner_hess_blocks(z_warm, y_warm, zd_warm))
-            jax.block_until_ready(terminal_hess_block(z_warm, y_warm, zd_warm))
+                zd_warm = jnp.asarray(vars_in.z, dtype=jnp.float64)
+            else:
+                zd_warm = jnp.zeros(0, dtype=jnp.float64)
+            jax.block_until_ready(f_fn(z_flat_warm))
+            jax.block_until_ready(grad_f_fn(z_flat_warm))
+            jax.block_until_ready(c_fn(z_flat_warm))
+            jax.block_until_ready(dyn_jac_blocks(z_flat_warm))
+            if has_user_eq:
+                jax.block_until_ready(user_eq_jac_inner_blocks(z_flat_warm))
+                jax.block_until_ready(user_eq_jac_terminal(z_flat_warm))
+            if has_ineq:
+                jax.block_until_ready(g_fn(z_flat_warm))
+                jax.block_until_ready(ineq_jac_inner_blocks(z_flat_warm))
+                jax.block_until_ready(ineq_jac_terminal(z_flat_warm))
+            jax.block_until_ready(inner_hess_blocks(z_flat_warm, y_warm, zd_warm))
+            jax.block_until_ready(terminal_hess_block(z_flat_warm, y_warm, zd_warm))
         except Exception:  # noqa: BLE001
             pass
 
@@ -1562,30 +1449,35 @@ class SipAdapter(SolverAdapter):
         X, U, Theta = _slice_iterate(z_val, problem)
 
         # ===== Multiplier extraction =====
-        # SIP's vars_in.y has shape (y_dim,) in the FILTERED layout;
-        # evaluate_problem expects the FULL layout
-        # [init(n); dyn(T*n); user_eq((T+1)*eq_dim_user)]. Scatter
-        # filtered → full and sign-flip the dyn rows (c() encodes
-        # X[t+1] - dyn(...) while evaluate_problem measures
-        # dyn(...) - X[t+1]).
+        # Sign-flip dyn rows because c() encodes X[t+1] - dyn(...) while
+        # evaluate_problem measures dyn(...) - X[t+1].
         try:
-            y_filtered = np.asarray(vars_in.y, dtype=np.float64).reshape(-1)
-            multipliers_eq_full = np.zeros(c_full_dim, dtype=np.float64)
-            multipliers_eq_full[keep_mask_eq] = y_filtered
+            multipliers_eq_full = np.asarray(vars_in.y, dtype=np.float64).reshape(-1)
             multipliers_eq_full[n : n + T * n] = -multipliers_eq_full[n : n + T * n]
         except Exception:  # noqa: BLE001
             multipliers_eq_full = None
         try:
             if has_ineq:
-                z_filtered = np.asarray(vars_in.z, dtype=np.float64).reshape(-1)
-                multipliers_ineq_full = np.zeros(g_full_dim, dtype=np.float64)
-                multipliers_ineq_full[keep_mask_ineq] = z_filtered
+                multipliers_ineq_full = np.asarray(
+                    vars_in.z,
+                    dtype=np.float64,
+                ).reshape(-1)
+                slacks_full = np.asarray(vars_in.s, dtype=np.float64).reshape(-1)
             else:
                 multipliers_ineq_full = None
+                slacks_full = None
         except Exception:  # noqa: BLE001
             multipliers_ineq_full = None
-
+            slacks_full = None
         if output is None:
+            warm_start_out = _make_warm_start_out(
+                multipliers_eq_full=multipliers_eq_full,
+                multipliers_ineq_full=multipliers_ineq_full,
+                slacks_full=slacks_full,
+                n=n,
+                T=T,
+                eq_dim=eq_dim_user,
+            )
             return pack_solver_result(
                 solver_name=self.name,
                 problem_name=problem.name,
@@ -1599,11 +1491,21 @@ class SipAdapter(SolverAdapter):
                 notes=err,
                 multipliers_eq=multipliers_eq_full,
                 multipliers_ineq=multipliers_ineq_full,
+                warm_start_out=warm_start_out,
                 iterates_xut=iter_xut or None,
             )
 
         status = output.exit_status
         success = status == sip.Status.SOLVED
+        notes = _sip_status_notes(output)
+        warm_start_out = _make_warm_start_out(
+            multipliers_eq_full=multipliers_eq_full,
+            multipliers_ineq_full=multipliers_ineq_full,
+            slacks_full=slacks_full,
+            n=n,
+            T=T,
+            eq_dim=eq_dim_user,
+        )
         return pack_solver_result(
             solver_name=self.name,
             problem_name=problem.name,
@@ -1614,9 +1516,10 @@ class SipAdapter(SolverAdapter):
             iterations=int(output.num_iterations),
             solve_time_ms=solve_time_ms,
             success=success,
-            notes=str(status),
+            notes=notes,
             multipliers_eq=multipliers_eq_full,
             multipliers_ineq=multipliers_ineq_full,
+            warm_start_out=warm_start_out,
             iterates_xut=iter_xut or None,
         )
 
@@ -1630,15 +1533,9 @@ class SipAdapter(SolverAdapter):
         (``z = vec(X) ++ vec(U) ++ Theta``) so iter counts should match
         the JAX backend to within FP noise on analytical problems.
 
-        Sparsity is taken directly from CasADi's symbolic-graph
-        analysis (no mock-eval probe), and the Jacobian / Hessian
-        templates are built from the CasADi sparsity patterns. The
-        cost-only Hessian is materialised dense per-call for the
-        eigen-clamp PSD projection — same as the JAX path.
-
-        Caller is responsible for verifying
-        ``problem.metadata["casadi_builder"]`` is present and the
-        Hessian mode is "cost"; the constructor + ``solve`` enforce both.
+        Sparsity is taken directly from CasADi's symbolic-graph analysis
+        (no mock-eval probe), and the Jacobian / Lagrangian-Hessian
+        templates are built from the CasADi sparsity patterns.
         """
         sip = _import_sip()
         ca = _import_casadi()
@@ -1652,8 +1549,8 @@ class SipAdapter(SolverAdapter):
         grad_f_fn = nlp["grad_f_fn"]
         jac_c_fn = nlp["jac_c_fn"]
         jac_g_fn = nlp["jac_g_fn"]
-        stage_hess_meta = nlp["stage_hess_meta"]
-        upp_hess_pat_dense = nlp["upp_hess_pat"]
+        hess_lag_fn = nlp["hess_lag_fn"]
+        hess_lag_sparsity = nlp["hess_lag_sparsity"]
         x_dim = nlp["x_dim"]
         y_dim = nlp["y_dim"]
         s_dim = nlp["s_dim"]
@@ -1661,13 +1558,7 @@ class SipAdapter(SolverAdapter):
         jac_g_sparsity = nlp["jac_g_sparsity"]
 
         # --- Build initial guess ---------------------------------------------
-        z_init = np.concatenate(
-            [
-                np.asarray(problem.X_init, dtype=np.float64).reshape(-1),
-                np.asarray(problem.U_init, dtype=np.float64).reshape(-1),
-                np.asarray(problem.Theta_init, dtype=np.float64).reshape(-1),
-            ]
-        )
+        z_init = _initial_decision_vector(problem)
         assert z_init.size == x_dim, (
             f"CasADi flat NLP got x_dim={x_dim} but z_init.size={z_init.size}; "
             "this indicates a mismatch between ProblemSpec dimensions and the "
@@ -1724,12 +1615,39 @@ class SipAdapter(SolverAdapter):
         jac_c_template, jac_c_perm = _build_jac_template(jac_c_sparsity, y_dim)
         jac_g_template, jac_g_perm = _build_jac_template(jac_g_sparsity, s_dim)
 
-        # Hessian: CSC of upper triangle, shape (x_dim, x_dim). The sparse
-        # template comes from the union of per-stage block symbolic
-        # nonzeros (built in ``_build_casadi_nlp`` as ``upp_hess_pat``).
-        # Each per-call PSD-projected stage block is written into the
-        # corresponding slot via fancy indexing.
-        upp_hess_template = upp_hess_pat_dense.astype(np.float64).tocsc()
+        def _build_upper_hess_template(sparsity):
+            col_ind = np.asarray(sparsity.colind(), dtype=np.intp)
+            row_ind = np.asarray(sparsity.row(), dtype=np.intp)
+            col_by_nz = np.repeat(np.arange(sparsity.size2()), np.diff(col_ind))
+            source_by_upper: dict[tuple[int, int], int] = {}
+            for src, (row, col) in enumerate(zip(row_ind, col_by_nz)):
+                row_i = int(row)
+                col_i = int(col)
+                upper_key = (
+                    (row_i, col_i) if row_i <= col_i else (col_i, row_i)
+                )
+                if upper_key not in source_by_upper or row_i <= col_i:
+                    source_by_upper[upper_key] = src
+
+            for i in range(x_dim):
+                source_by_upper.setdefault((i, i), -1)
+
+            upper_entries = sorted(source_by_upper, key=lambda rc: (rc[1], rc[0]))
+            rows, cols = zip(*upper_entries)
+            source_nz = [source_by_upper[(row, col)] for row, col in zip(rows, cols)]
+
+            template = sp.csc_matrix(
+                (
+                    np.zeros(len(rows), dtype=np.float64),
+                    (np.asarray(rows, dtype=np.intp), np.asarray(cols, dtype=np.intp)),
+                ),
+                shape=(x_dim, x_dim),
+            )
+            return template, np.asarray(source_nz, dtype=np.intp)
+
+        upp_hess_template, hess_lag_perm = _build_upper_hess_template(
+            hess_lag_sparsity
+        )
 
         # --- Build ProblemDimensions / QDLDLSettings -------------------------
         pd = sip.ProblemDimensions()
@@ -1758,27 +1676,31 @@ class SipAdapter(SolverAdapter):
         pd.kkt_L_nnz = _perm_result.L_nnz
 
         # --- Settings --------------------------------------------------------
-        problem_overrides = problem.metadata.get("sip_settings", {})
+        problem_overrides = dict(problem.metadata.get("sip_settings", {}))
+        time_limit_s = _custom_time_limit_s(
+            {"time_limit_s": self.timeout_s},
+            problem_overrides,
+            self.sip_extra_settings,
+        )
         ss = sip.Settings()
         ss.max_iterations = int(self.max_iter)
-        ss.max_kkt_violation = float(self._effective_tol)
-        ss.enable_elastics = self.enable_elastics
-        if self.enable_elastics:
-            ss.elastic_var_cost_coeff = self.elastic_var_cost_coeff
-        ss.penalty_parameter_increase_factor = self.penalty_parameter_increase_factor
-        ss.mu_update_factor = self.mu_update_factor
-        ss.initial_mu = self.initial_mu
-        ss.initial_penalty_parameter = self.initial_penalty_parameter
-        ss.print_logs = self.print_logs
+        ss.termination.max_dual_residual = float(self._effective_tol)
+        ss.termination.max_constraint_violation = float(self._effective_tol)
+        ss.termination.max_complementarity_gap = float(self._effective_tol)
+        ss.penalty.penalty_parameter_increase_factor = (
+            self.penalty_parameter_increase_factor
+        )
+        ss.barrier.mu_update_factor = self.mu_update_factor
+        ss.barrier.initial_mu = self.initial_mu
+        ss.penalty.initial_penalty_parameter = self.initial_penalty_parameter
+        ss.logging.print_logs = self.print_logs
         if not self.print_logs:
-            ss.print_line_search_logs = False
-            ss.print_search_direction_logs = False
-            ss.print_derivative_check_logs = False
+            ss.logging.print_line_search_logs = False
+            ss.logging.print_search_direction_logs = False
+            ss.logging.print_derivative_check_logs = False
         ss.assert_checks_pass = False
-        for k, v in problem_overrides.items():
-            setattr(ss, k, v)
-        for k, v in self.sip_extra_settings.items():
-            setattr(ss, k, v)
+        _apply_sip_settings(ss, problem_overrides)
+        _apply_sip_settings(ss, self.sip_extra_settings)
 
         # --- Build the model callback ---------------------------------------
         # Reusable buffers, written in-place each callback. We bind them to
@@ -1786,72 +1708,6 @@ class SipAdapter(SolverAdapter):
         jac_c_buf = jac_c_template.copy()
         jac_g_buf = jac_g_template.copy()
         upp_hess_buf = upp_hess_template.copy()
-
-        psd_reg_delta = self.psd_reg_delta
-
-        # Pre-compute a write-back plan for each per-stage Hessian block:
-        # for each stage, determine which entries of the dense block (i, j
-        # ranging over [0, block_size)) land in which slot of
-        # ``upp_hess_buf.data``. Computed once; per-call we just iterate
-        # the stages and do an in-place assignment.
-        #
-        # The buffer is CSC; CSC stores .data in column-major order, and
-        # column k's entries are at indices [indptr[k], indptr[k+1]) with
-        # row indices ``indices[indptr[k]:indptr[k+1]]``. We build, for
-        # each stage block, two flattened arrays:
-        #
-        #   ``block_src_i[k], block_src_j[k]`` — block-local (row, col)
-        #     of the k-th nonzero we want to write back (block-local in
-        #     [0, block_size)). We always write the upper-triangle entries
-        #     (row <= col), summing contributions across stages where
-        #     blocks overlap (theta cross-stage entries).
-        #   ``buf_data_idx[k]`` — index into ``upp_hess_buf.data`` that
-        #     this entry writes to.
-        #
-        # Since multiple stages can hit the same global (i, j) entry (the
-        # theta-theta block in particular), we sum contributions by
-        # `np.add.at` per call. Build the index dictionary now to map
-        # (global_i, global_j) -> upp_hess_buf.data slot.
-        buf_indptr = upp_hess_buf.indptr
-        buf_indices = upp_hess_buf.indices
-        gij_to_data_idx = {}
-        for col in range(upp_hess_buf.shape[1]):
-            for k in range(buf_indptr[col], buf_indptr[col + 1]):
-                row = buf_indices[k]
-                gij_to_data_idx[(row, col)] = k
-
-        # For each stage, build the index arrays.
-        stage_writebacks = []
-        for meta in stage_hess_meta:
-            idx = meta["z_idx"]
-            bs = meta["block_size"]
-            src_i = []
-            src_j = []
-            data_idx = []
-            for i in range(bs):
-                gi = int(idx[i])
-                for j in range(bs):
-                    gj = int(idx[j])
-                    if gi > gj:
-                        continue  # only upper triangle
-                    pos = gij_to_data_idx.get((gi, gj))
-                    if pos is None:
-                        # Shouldn't happen — upp_hess_pat covers every
-                        # stage-block entry by construction.
-                        continue
-                    src_i.append(i)
-                    src_j.append(j)
-                    data_idx.append(pos)
-            stage_writebacks.append(
-                {
-                    "fn": meta["fn"],
-                    "z_idx": idx,
-                    "block_size": bs,
-                    "src_i": np.asarray(src_i, dtype=np.intp),
-                    "src_j": np.asarray(src_j, dtype=np.intp),
-                    "data_idx": np.asarray(data_idx, dtype=np.intp),
-                }
-            )
 
         # Per-iter recorder (CasADi backend variant).
         iter_xut: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
@@ -1890,56 +1746,66 @@ class SipAdapter(SolverAdapter):
                 jac_g_buf.data[:] = jg_nz[jac_g_perm]
             mco.jacobian_g = jac_g_buf
 
-            # Per-stage cost Hessian + eigen-clamp PSD projection. Each
-            # block is small (the per-stage dimension), so the eigh is
-            # essentially free; the key benefit vs a single global eigh on
-            # the full Hessian is avoiding cubic scaling in the horizon.
-            #
-            # Subtle: for problems with cross-stage theta (td > 0), the
-            # per-stage blocks overlap on the theta dimension(s). We
-            # ZERO the .data slots first and then ADD each stage's
-            # contribution — this correctly sums the theta-theta blocks
-            # across stages (matching what the global Hessian would give
-            # before PSD-projection). After per-stage PSD-projection the
-            # resulting Hessian differs from a global eigen-clamp; this
-            # is the standard local-block-regularization trade-off that
-            # SQP-with-stage-decomposed-Hessians takes, and is acceptable
-            # because the cost-only mode is already an SQP approximation.
+            h_args = [z_np]
+            if y_dim > 0:
+                h_args.append(np.asarray(mci.y, dtype=np.float64))
+            if s_dim > 0:
+                h_args.append(np.asarray(mci.z, dtype=np.float64))
+            h_nz = np.asarray(hess_lag_fn(*h_args).nonzeros(), dtype=np.float64)
             upp_hess_buf.data[:] = 0.0
-            for wb in stage_writebacks:
-                z_slice = z_np[wb["z_idx"]]
-                H_block = np.asarray(wb["fn"](z_slice), dtype=np.float64)
-                if H_block.size == 0:
-                    continue
-                # PSD-project this block.
-                if H_block.shape[0] > 1:
-                    S, _V = np.linalg.eigh(H_block)
-                    s_min = float(S[0])
-                else:
-                    s_min = float(H_block[0, 0])
-                k = max(-s_min, 0.0) + psd_reg_delta
-                if k > 0.0:
-                    # Add k*I to the block.
-                    bs = wb["block_size"]
-                    H_block.flat[:: bs + 1] += k
-                # Write back upper-triangle entries (sum across stages
-                # for overlapping entries — np.add.at, scatter-add).
-                vals = H_block[wb["src_i"], wb["src_j"]]
-                np.add.at(upp_hess_buf.data, wb["data_idx"], vals)
+            present = hess_lag_perm >= 0
+            upp_hess_buf.data[present] = h_nz[hess_lag_perm[present]]
             mco.upper_hessian_lagrangian = upp_hess_buf
 
             return mco
 
         # --- Construct the solver --------------------------------------------
-        solver = sip.Solver(ss, qs, pd, mc)
+        solver = sip.Solver(ss, qs, pd, mc, time_limit_s)
 
         # --- Initial Variables ----------------------------------------------
         vars_in = sip.Variables(pd)
         vars_in.x[:] = z_init
-        vars_in.s[:] = 1.0
+        if s_dim > 0:
+            g_init = np.asarray(g_fn(z_init), dtype=np.float64).reshape(-1)
+        else:
+            g_init = np.zeros(0, dtype=np.float64)
+        s_init, zd_init = _initialize_slacks_and_duals(
+            g_init,
+            ss.barrier.initial_mu,
+        )
+        vars_in.s[:] = s_init
+        vars_in.z[:] = zd_init
         vars_in.y[:] = 0.0
-        vars_in.e[:] = 0.0
-        vars_in.z[:] = 1.0
+        warm_start = problem.warm_start or {}
+        y_full_init = _initialize_eq_multipliers_from_warm_start(
+            warm_start,
+            n=problem.n,
+            T=problem.T,
+            eq_dim=problem.eq_dim,
+        )
+        if y_full_init.size != y_dim:
+            y_compact = np.zeros(y_dim, dtype=np.float64)
+            common = min(y_dim, problem.n + problem.T * problem.n)
+            y_compact[:common] = y_full_init[:common]
+            y_full_init = y_compact
+        if np.any(y_full_init):
+            vars_in.y[:] = y_full_init
+        if s_dim > 0:
+            s_warm = _warm_start_vector(warm_start, "S", s_dim)
+            z_dual_warm = _warm_start_vector(warm_start, "Z", s_dim)
+            warm_floor = max(
+                float(ss.barrier.initial_mu),
+                1e-8,
+            )
+            s_warm = _strictly_positive_warm_start(s_warm, floor=warm_floor)
+            z_dual_warm = _strictly_positive_warm_start(
+                z_dual_warm,
+                floor=warm_floor,
+            )
+            if s_warm is not None:
+                vars_in.s[:] = s_warm
+            if z_dual_warm is not None:
+                vars_in.z[:] = z_dual_warm
 
         # --- Warm-up call -----------------------------------------------------
         # CasADi Functions have no JIT to amortise but we still call each
@@ -1974,12 +1840,10 @@ class SipAdapter(SolverAdapter):
         z_val = np.asarray(vars_in.x, dtype=np.float64).copy()
         X, U, Theta = _slice_iterate(z_val, problem)
 
-        # Multipliers — the CasADi backend doesn't filter rows so the
-        # mapping is direct (one-to-one with evaluate_problem's
-        # constraint stacks). The CasADi NLP encodes the dyn defect
-        # as X[t+1] - dyn(...) (same as the JAX backend, opposite
-        # from evaluate_problem) so we sign-flip just the dyn-defect
-        # rows.
+        # Multipliers are one-to-one with evaluate_problem's constraint
+        # stacks. The CasADi NLP encodes the dyn defect as
+        # X[t+1] - dyn(...) (same as the JAX backend, opposite from
+        # evaluate_problem), so we sign-flip just the dyn-defect rows.
         try:
             multipliers_eq_full = np.asarray(
                 vars_in.y,
@@ -1998,10 +1862,22 @@ class SipAdapter(SolverAdapter):
                 vars_in.z,
                 dtype=np.float64,
             ).reshape(-1)
+            slacks_full = np.asarray(
+                vars_in.s,
+                dtype=np.float64,
+            ).reshape(-1)
         except Exception:  # noqa: BLE001
             multipliers_ineq_full = None
-
+            slacks_full = None
         if output is None:
+            warm_start_out = _make_warm_start_out(
+                multipliers_eq_full=multipliers_eq_full,
+                multipliers_ineq_full=multipliers_ineq_full,
+                slacks_full=slacks_full,
+                n=problem.n,
+                T=problem.T,
+                eq_dim=problem.eq_dim,
+            )
             return pack_solver_result(
                 solver_name=self.name,
                 problem_name=problem.name,
@@ -2015,11 +1891,21 @@ class SipAdapter(SolverAdapter):
                 notes=err,
                 multipliers_eq=multipliers_eq_full,
                 multipliers_ineq=multipliers_ineq_full,
+                warm_start_out=warm_start_out,
                 iterates_xut=iter_xut or None,
             )
 
         status = output.exit_status
         success = status == sip.Status.SOLVED
+        notes = _sip_status_notes(output)
+        warm_start_out = _make_warm_start_out(
+            multipliers_eq_full=multipliers_eq_full,
+            multipliers_ineq_full=multipliers_ineq_full,
+            slacks_full=slacks_full,
+            n=problem.n,
+            T=problem.T,
+            eq_dim=problem.eq_dim,
+        )
         return pack_solver_result(
             solver_name=self.name,
             problem_name=problem.name,
@@ -2030,9 +1916,10 @@ class SipAdapter(SolverAdapter):
             iterations=int(output.num_iterations),
             solve_time_ms=solve_time_ms,
             success=success,
-            notes=str(status),
+            notes=notes,
             multipliers_eq=multipliers_eq_full,
             multipliers_ineq=multipliers_ineq_full,
+            warm_start_out=warm_start_out,
             iterates_xut=iter_xut or None,
         )
 

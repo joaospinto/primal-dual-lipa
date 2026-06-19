@@ -26,16 +26,6 @@ _PROBLEMS: dict[str, tuple[str, dict]] = {
         {"with_theta": True},
     ),
     "barrel_roll": ("tests.comparison.problems.mjx_barrel_roll", {}),
-    # Short-horizon variants used to validate the IPOPT-via-JAX-callback
-    # path can run end-to-end in tractable time. Same problem otherwise.
-    "barrel_roll_N20": (
-        "tests.comparison.problems.mjx_barrel_roll",
-        {"N_override": 20},
-    ),
-    "barrel_roll_N10": (
-        "tests.comparison.problems.mjx_barrel_roll",
-        {"N_override": 10},
-    ),
     "backflip": ("tests.comparison.problems.mjx_backflip", {}),
     "jump": ("tests.comparison.problems.mjx_jump", {}),
     "trot": ("tests.comparison.problems.mjx_trot", {}),

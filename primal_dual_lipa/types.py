@@ -18,6 +18,23 @@ from regularized_lqr_jax.types import (
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
+class HessianRegularizationSettings:
+    """Settings for IPOPT-style primal Hessian regularization."""
+
+    initial: jnp.double = 0.0
+    first_positive: jnp.double = 1e-8
+    minimum: jnp.double = 0.0
+    maximum: jnp.double = 1e8
+    increase_factor: jnp.double = 10.0
+    decrease_factor: jnp.double = 0.1
+    pd_tol: jnp.double = 0.0
+    singular_tol: jnp.double = 0.0
+    descent_tol: jnp.double = 0.0
+    max_attempts: jnp.int32 = field(default=18, metadata={"static": True})
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
 class SolverSettings:
     """Encapsulate a few solver settings."""
 
@@ -82,8 +99,18 @@ class SolverSettings:
     )
     use_parallel_lqr: jnp.bool = field(default=False, metadata={"static": True})
     skip_line_search: jnp.bool = field(default=False, metadata={"static": True})
+    # Add a barrier-scaled diagonal term to W^{-1}=Z/S in the slack
+    # elimination. False matches the regularized-IPM derivation exactly;
+    # True preserves the historically useful extra regularization.
+    regularize_slack_elimination_with_mu: jnp.bool = field(
+        default=True,
+        metadata={"static": True},
+    )
     print_logs: jnp.bool = field(default=False, metadata={"static": True})
     print_ls_logs: jnp.bool = field(default=False, metadata={"static": True})
+    hessian_regularization: HessianRegularizationSettings = field(
+        default_factory=HessianRegularizationSettings
+    )
 
 
 Function = Callable[[jax.Array, jax.Array, jax.Array, jnp.int32], jax.Array]
@@ -107,6 +134,7 @@ class KKTFactorizationInputs:
     """Inputs to the KKT factorization."""
 
     P: jax.Array
+    P_lqr: jax.Array
     D: jax.Array
     E: jax.Array
     G: jax.Array

@@ -81,7 +81,6 @@ _RESERVED_METADATA_KEYS: frozenset[str] = frozenset(
         "sip_jax_settings",
         "sip_casadi_settings",
         "sip_warmup_settings",
-        "sip_hessian_psd_mode",
         "trajax_settings",
         "trajax_warmup_settings",
         "ipopt_settings",
@@ -180,11 +179,9 @@ class ProblemSpec:
       uses ``warmup_cost`` with no inequalities (per-solver schedule
       from ``<solver>_warmup_settings`` shadows the matching
       ``<solver>_settings``); Phase 2 re-solves the original problem
-      warm-started from Phase 1's iterate. Only LIPA opts in by
-      default today; other solvers can be opted in per-problem if
-      their algorithm benefits.
-    * ``sip_settings`` — per-problem ``sip_python`` settings overrides
-      (``sip.py``; honored on both analytical and MJX problems).
+      warm-started from Phase 1's iterate.
+    * ``sip_settings`` — per-problem nested ``sip_python.Settings``
+      overrides (``sip.py``; honored on both analytical and MJX problems).
     * ``ipopt_mjx_extra_options`` — per-problem IPOPT option overrides
       for the sparse-callback MJX adapter (``ipopt_mjx_sparse.py``).
     * ``acados_warm_start`` — string selector for the acados adapter's
@@ -722,22 +719,20 @@ def pack_solver_result(
             iterates_xut,
         )
 
-    # Framework's ok/fail label is purely a primal-feasibility check:
-    # ``eq_v`` and ``ineq_v`` (scale-invariant raw constraint
-    # violations) both within ``success_tol``. The adapter's incoming
-    # ``success`` flag is INTENTIONALLY IGNORED here — each solver
-    # defines its internal "converged" flag differently (LIPA: iter <
-    # max_iter; IPOPT: status == OK; CSQP: termination_status enum;
-    # etc.), so ANDing them in would introduce a non-uniform per-
-    # solver gate on top of the uniform primal check and fail solvers
-    # that hit their iter cap with a feasible iterate. Dual /
-    # complementarity / stationarity residuals are intentionally NOT
-    # included either: their numeric scales depend on each solver's
+    # Framework's ok/fail label requires both solver-native convergence
+    # and canonical primal feasibility. The primal check keeps every
+    # adapter on the same raw constraint bar; the incoming ``success``
+    # flag prevents statuses such as SIP's ITERATION_LIMIT or
+    # LINE_SEARCH_FAILURE from being reported as solved merely because
+    # the last iterate is feasible.
+    #
+    # Dual / complementarity / stationarity residuals are intentionally
+    # NOT included: their numeric scales depend on each solver's
     # multiplier convention (AL-penalty-scaled, interior-point-mu-
     # scaled, raw KKT, etc.), so applying a uniform tolerance to them
     # would unfairly fail solvers whose multipliers are not normalised
-    # to the framework's convention. NaN / Inf iterates naturally
-    # fail the < comparison so are handled.
+    # to the framework's convention. NaN / Inf iterates naturally fail
+    # the < comparison so are handled.
     #
     # Per-problem ``success_tol`` override: when the caller doesn't
     # explicitly pass one, we honour ``problem.metadata['success_tol']``
@@ -748,7 +743,8 @@ def pack_solver_result(
     # tolerance it can reliably meet.
     if success_tol is None:
         success_tol = float(problem.metadata.get("success_tol", 1e-6))
-    success = bool(float(eq_v) <= success_tol and float(ineq_v) <= success_tol)
+    primal_success = bool(float(eq_v) <= success_tol and float(ineq_v) <= success_tol)
+    success = bool(success and primal_success)
 
     result = SolverResult(
         solver_name=solver_name,

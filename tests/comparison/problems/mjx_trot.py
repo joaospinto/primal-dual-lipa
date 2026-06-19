@@ -11,9 +11,14 @@ def make_problem() -> ProblemSpec:
         "tests.mpc_examples.configs.config_aliengo_trot",
         name="trot",
     )
-    spec.metadata["sip_jax_settings"] = dict(
-        penalty_parameter_increase_factor=1.0,
-        mu_update_factor=0.9,
-        initial_mu=1e-3,
-    )
+    spec.metadata["sip_jax_settings"] = {
+        "penalty": {"penalty_parameter_increase_factor": 1.0},
+        "barrier": {
+            "initial_mu": 1e-3,
+            "mu_update_factor": 0.9,
+        },
+        "regularization": {"initial": 0.01},
+    }
+    spec.metadata["sip_two_phase"] = True
+    spec.metadata["lipa_two_phase"] = False
     return spec

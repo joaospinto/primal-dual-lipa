@@ -22,11 +22,12 @@ _cache_dir = os.environ.get(
     "JAX_COMPILATION_CACHE_DIR",
     os.path.expanduser("~/.cache/jax/primal-dual-lipa"),
 )
-try:
-    os.makedirs(_cache_dir, exist_ok=True)
-    jax.config.update("jax_compilation_cache_dir", _cache_dir)
-    jax.config.update("jax_persistent_cache_min_compile_time_secs", 1.0)
-    jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
-except OSError:
-    # Read-only filesystem (sandbox, etc.) — skip cache config silently.
-    pass
+if _cache_dir:
+    try:
+        os.makedirs(_cache_dir, exist_ok=True)
+        jax.config.update("jax_compilation_cache_dir", _cache_dir)
+        jax.config.update("jax_persistent_cache_min_compile_time_secs", 1.0)
+        jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+    except OSError:
+        # Read-only filesystem (sandbox, etc.) — skip cache config silently.
+        pass

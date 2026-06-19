@@ -6,9 +6,8 @@ This is used to compute the line search direction at each optimization step.
 from functools import partial
 
 import jax
-import jax.scipy as jsp
 from jax import numpy as jnp
-from regularized_lqr_jax.helpers import project_psd_cone
+from regularized_lqr_jax.helpers import symmetrize
 
 from primal_dual_lipa.lagrangian_helpers import build_lagrangian, pad
 from primal_dual_lipa.types import (
@@ -22,105 +21,53 @@ from primal_dual_lipa.types import (
 from primal_dual_lipa.vectorization_helpers import linearize, quadratize, vectorize
 
 
-@partial(jax.jit, static_argnames=["dims"])
-def block_schur_psd_projection(M, dims, eps):
-    """Recursively computes a faster approximate PSD projection of matrix M
-    using Schur complements over block sizes specified in `dims`.
-    """
-    # Base case: only one block left
-    if len(dims) == 1:
-        return project_psd_cone(M, delta=eps)
+@jax.jit
+def regularize_primal_hessian_blocks(
+    Q: jax.Array,
+    R: jax.Array,
+    H_theta_theta_per_stage: jax.Array,
+    hessian_regularization: jnp.double,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Symmetrize Hessian blocks and shift only the primal blocks."""
+    Q = jax.vmap(symmetrize)(Q)
+    R = jax.vmap(symmetrize)(R)
+    H_theta_theta_per_stage = jax.vmap(symmetrize)(H_theta_theta_per_stage)
 
-    d = dims[0]
+    x_dim = Q.shape[-1]
+    u_dim = R.shape[-1]
+    Q = Q + hessian_regularization * jnp.eye(x_dim)
+    R = R + hessian_regularization * jnp.eye(u_dim)
 
-    # 1. Partition the matrix M = [[A, B], [B.T, D]]
-    A = M[:-d, :-d]
-    B = M[:-d, -d:]
-    D = M[-d:, -d:]
-
-    # 2. Project the bottom-right corner to the PSD cone
-    D_plus = project_psd_cone(D, delta=eps)
-
-    # 3. Compute the Schur residual (S = A - B * D_plus^-1 * B^T)
-    # Using jsp.linalg.solve with assume_a='pos' triggers a fast Cholesky solve
-    D_inv_B_T = jsp.linalg.solve(D_plus, B.T, assume_a="pos")
-    S = A - B @ D_inv_B_T
-
-    # 4. Recursively do the same thing with dims[1:] on the Schur residual
-    S_plus = block_schur_psd_projection(S, dims[1:], eps)
-
-    # 5. Reconstruct the original matrix
-    # Since S = A - B * D_plus^-1 * B^T, we substitute A_new for A
-    A_new = S_plus + B @ D_inv_B_T
-
-    # Reassemble blocks
-    top = jnp.concatenate([A_new, B], axis=1)
-    bottom = jnp.concatenate([B.T, D_plus], axis=1)
-    return jnp.concatenate([top, bottom], axis=0)
+    return Q, R, H_theta_theta_per_stage
 
 
 @jax.jit
-def regularize(
-    Q: jax.Array,
-    R: jax.Array,
-    M: jax.Array,
-    psd_delta: jnp.double,
-    H_theta_theta_per_stage: jax.Array,
-    H_x_theta: jax.Array,
-    H_u_theta: jax.Array,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Regularizes the KKT Hessian blocks including parameters.
-
-    This method ensures that the joint Hessian (wrt states, controls, and parameters)
-    is positive definite by building the joint cost matrix per stage and
-    projecting it to the PSD cone using recursive Schur complements.
-    """
-    T, n, m = M.shape
-    p = H_theta_theta_per_stage.shape[-1]
-
-    # 1. Stage-wise projection for t = 0, ..., T-1
-    # Matrix layout: [Q, H_x_theta, M], [H_x_theta.T, H_theta_theta, H_u_theta.T], [M.T, H_u_theta, R]
-    # This matches the user request: states, thetas, controls order.
-    def project_stage(q, r, m_block, h_theta, h_x_theta, h_u_theta):
-        top = jnp.concatenate([q, h_x_theta, m_block], axis=1)
-        mid = jnp.concatenate([h_x_theta.T, h_theta, h_u_theta.T], axis=1)
-        bot = jnp.concatenate([m_block.T, h_u_theta, r], axis=1)
-        full = jnp.concatenate([top, mid, bot], axis=0)
-
-        # dims=(m, p, n) projects R first, then theta, then Q
-        full_reg = block_schur_psd_projection(full, (m, p, n), psd_delta)
-
-        # Extract diagonal blocks
-        return (
-            full_reg[:n, :n],
-            full_reg[n + p :, n + p :],
-            full_reg[n : n + p, n : n + p],
-        )
-
-    Q_reg_stages, R_reg, H_theta_per_stage_reg = jax.vmap(project_stage)(
-        Q[:-1], R, M, H_theta_theta_per_stage[:-1], H_x_theta[:-1], H_u_theta
+def add_scalar_hessian_regularization_delta(
+    kkt_system: KKTSystem,
+    hessian_regularization_delta: jnp.double,
+) -> KKTSystem:
+    """Shift cached primal Hessian blocks after a scalar regularization change."""
+    lhs = kkt_system.lhs
+    xu_dim = lhs.P.shape[-1]
+    theta_dim = lhs.H_theta_theta.shape[-1]
+    P_shift = hessian_regularization_delta * jnp.eye(xu_dim)[None, ...]
+    H_theta_theta_shift = hessian_regularization_delta * jnp.eye(theta_dim)
+    lhs_new = KKTFactorizationInputs(
+        P=lhs.P + P_shift,
+        P_lqr=lhs.P_lqr + P_shift,
+        D=lhs.D,
+        E=lhs.E,
+        G=lhs.G,
+        w_inv=lhs.w_inv,
+        params=lhs.params,
+        H_theta_theta=lhs.H_theta_theta + H_theta_theta_shift,
+        H_theta_X=lhs.H_theta_X,
+        H_theta_U=lhs.H_theta_U,
+        H_theta_y_dyn=lhs.H_theta_y_dyn,
+        H_theta_y_eq=lhs.H_theta_y_eq,
+        H_theta_z=lhs.H_theta_z,
     )
-
-    # 2. Terminal stage projection
-    def project_terminal(q, h_theta, h_x_theta):
-        top = jnp.concatenate([q, h_x_theta], axis=1)
-        bot = jnp.concatenate([h_x_theta.T, h_theta], axis=1)
-        full = jnp.concatenate([top, bot], axis=0)
-
-        # dims=(p, n) projects theta first, then Q
-        full_reg = block_schur_psd_projection(full, (p, n), psd_delta)
-        return full_reg[:n, :n], full_reg[n:, n:]
-
-    Q_reg_T, H_theta_T_reg = project_terminal(
-        Q[T], H_theta_theta_per_stage[T], H_x_theta[T]
-    )
-
-    Q_reg = jnp.concatenate([Q_reg_stages, Q_reg_T[None, ...]], axis=0)
-    H_theta_per_stage_reg = jnp.concatenate(
-        [H_theta_per_stage_reg, H_theta_T_reg[None, ...]], axis=0
-    )
-
-    return Q_reg, R_reg, H_theta_per_stage_reg
+    return KKTSystem(lhs=lhs_new, rhs=kkt_system.rhs)
 
 
 @partial(
@@ -130,6 +77,7 @@ def regularize(
         "dynamics",
         "equalities",
         "inequalities",
+        "regularize_slack_elimination_with_mu",
     ],
 )
 def build_kkt_lhs(
@@ -140,6 +88,8 @@ def build_kkt_lhs(
     x0: jax.Array,
     vars: Variables,
     params: Parameters,
+    hessian_regularization: jnp.double,
+    regularize_slack_elimination_with_mu: bool,
 ) -> KKTFactorizationInputs:
     """Build the LHS of the Newton-KKT system."""
     T = vars.X.shape[0] - 1
@@ -174,23 +124,26 @@ def build_kkt_lhs(
     M = M_pad[:-1]
     R = R_pad[:-1]
 
-    Q, R, H_theta_theta_per_stage = regularize(
+    Q, R, H_theta_theta_per_stage = regularize_primal_hessian_blocks(
         Q=Q,
         R=R,
-        M=M,
-        psd_delta=1e-3,
         H_theta_theta_per_stage=H_theta_theta_per_stage,
-        H_x_theta=H_x_theta,
-        H_u_theta=H_u_theta_pad[:-1],
+        hessian_regularization=hessian_regularization,
     )
 
     H_theta_theta = jnp.sum(H_theta_theta_per_stage, axis=0)
 
     M_pad = jnp.concatenate([M, jnp.zeros_like(M[0])[None, ...]], axis=0)
 
-    R_pad = jnp.concatenate([R, jnp.eye(R.shape[-1])[None, ...] * 1e-3], axis=0)
+    R_pad = jnp.concatenate(
+        [R, jnp.eye(R.shape[-1])[None, ...] * hessian_regularization],
+        axis=0,
+    )
 
     P = jax.vmap(lambda q, m, r: jnp.block([[q, m], [m.T, r]]))(Q, M_pad, R_pad)
+    H_theta_theta = H_theta_theta + hessian_regularization * jnp.eye(
+        H_theta_theta.shape[-1]
+    )
 
     dynamics_linearizer = linearize(dynamics)
     A, B, H_theta_y_dyn = dynamics_linearizer(vars.X[:-1], vars.U, vars.Theta, T_range)
@@ -204,7 +157,17 @@ def build_kkt_lhs(
     G_x, G_u, H_theta_z = inequalities_linearizer(vars.X, U_pad, vars.Theta, Tp1_range)
     G = jnp.concatenate([G_x, G_u], axis=-1)
 
-    w_inv = jnp.clip(vars.Z / vars.S, 1e-8, 1e8) + params.μ
+    w_inv = jnp.clip(vars.Z / vars.S, 1e-8, 1e8)
+    if regularize_slack_elimination_with_mu:
+        w_inv = w_inv + params.μ
+    w = 1.0 / w_inv
+    reg_w_inv = 1.0 / (w + 1.0 / params.η_ineq)
+    bmm = jax.vmap(jnp.matmul)
+    P_lqr = (
+        P
+        + bmm(E.mT, params.η_eq[..., None] * E)
+        + bmm(G.mT, reg_w_inv[..., None] * G)
+    )
 
     H_theta_y_dyn_full = jnp.concatenate(
         [jnp.zeros_like(H_theta_y_dyn[0])[None, ...], H_theta_y_dyn], axis=0
@@ -212,6 +175,7 @@ def build_kkt_lhs(
 
     return KKTFactorizationInputs(
         P=P,
+        P_lqr=P_lqr,
         D=D,
         E=E,
         G=G,
@@ -301,6 +265,7 @@ def build_kkt_rhs(
         "dynamics",
         "equalities",
         "inequalities",
+        "regularize_slack_elimination_with_mu",
     ],
 )
 def build_kkt(
@@ -311,6 +276,8 @@ def build_kkt(
     x0: jax.Array,
     vars: Variables,
     params: Parameters,
+    hessian_regularization: jnp.double = 0.0,
+    regularize_slack_elimination_with_mu: bool = True,
 ) -> KKTSystem:
     return KKTSystem(
         lhs=build_kkt_lhs(
@@ -321,6 +288,8 @@ def build_kkt(
             x0=x0,
             vars=vars,
             params=params,
+            hessian_regularization=hessian_regularization,
+            regularize_slack_elimination_with_mu=regularize_slack_elimination_with_mu,
         ),
         rhs=build_kkt_rhs(
             cost=cost,

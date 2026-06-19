@@ -54,6 +54,7 @@ class LipaAdapter(SolverAdapter):
 
     def solve(self, problem: ProblemSpec) -> SolverResult:
         T = problem.T
+        n = problem.n
         eq_dim = problem.eq_dim
         ineq_dim = problem.ineq_dim
 
@@ -170,31 +171,32 @@ class LipaAdapter(SolverAdapter):
 
         x0 = jnp.asarray(problem.x0)
 
-        # Dev-only: rebuild Parameters from cache when present (mu/eta
-        # values from the prior run). Skips the slow η ramp on re-solves.
+        # Rebuild Parameters from a warm start when the complete parameter
+        # state matches this problem. This intentionally rejects cross-phase
+        # warm starts whose inequality dimension changed.
         params_in = None
-        if cached is not None and all(
-            k in cached for k in ("µ", "η_dyn", "η_eq", "η_ineq")
-        ):
-            cached_η_eq = jnp.asarray(cached["η_eq"])
-            cached_η_ineq = jnp.asarray(cached["η_ineq"])
-            # Reject cached η shapes that don't match this run (e.g.,
-            # cross-phase ineq_dim mismatch). Fresh init otherwise.
-            if cached_η_eq.shape == (T + 1, eq_dim) and cached_η_ineq.shape == (
-                T + 1,
-                ineq_dim,
+        if all(k in ws for k in ("µ", "η_dyn", "η_eq", "η_ineq")):
+            η_dyn0 = jnp.asarray(ws["η_dyn"])
+            η_eq0 = jnp.asarray(ws["η_eq"])
+            η_ineq0 = jnp.asarray(ws["η_ineq"])
+            if (
+                η_dyn0.shape == (T + 1, n)
+                and η_eq0.shape == (T + 1, eq_dim)
+                and η_ineq0.shape == (T + 1, ineq_dim)
             ):
                 params_in = Parameters(
-                    µ=jnp.asarray(cached["µ"]),
-                    η_dyn=jnp.asarray(cached["η_dyn"]),
-                    η_eq=cached_η_eq,
-                    η_ineq=cached_η_ineq,
+                    µ=jnp.asarray(ws["µ"]),
+                    η_dyn=η_dyn0,
+                    η_eq=η_eq0,
+                    η_ineq=η_ineq0,
                 )
 
-        # Warm-up call so JIT compile time is excluded from the timed
-        # solve. The Phase-2 vs Phase-1 split historically lived here;
-        # it now lives in run_benchmark.py via the shared two-phase
-        # orchestration (gated on problem.metadata['lipa_two_phase']).
+        # Warm-up call so JIT compile time is excluded from the timed solve.
+        # The solve body is the same, but one iteration is enough to force
+        # compilation without duplicating the full benchmark run.
+        import dataclasses as _dc
+
+        compile_settings = _dc.replace(settings, max_iterations=1)
         warmup_out, _, _, _ = lipa_solve(
             vars_in=vars_in,
             x0=x0,
@@ -202,7 +204,7 @@ class LipaAdapter(SolverAdapter):
             dynamics=problem.dynamics,
             equalities=eq_fn,
             inequalities=ineq_fn,
-            settings=settings,
+            settings=compile_settings,
             params_in=params_in,
         )
         jax.block_until_ready(warmup_out.X)
@@ -295,6 +297,10 @@ class LipaAdapter(SolverAdapter):
             "Y_eq": Y_eq_arr,
             "S": S_arr,
             "Z": Z_arr,
+            "µ": np.asarray(final_params.µ),
+            "η_dyn": np.asarray(final_params.η_dyn),
+            "η_eq": np.asarray(final_params.η_eq),
+            "η_ineq": np.asarray(final_params.η_ineq),
         }
         return pack_solver_result(
             solver_name=self.name,

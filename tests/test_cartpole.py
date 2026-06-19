@@ -184,11 +184,12 @@ class TestCartpole(unittest.TestCase):
 
         # TODO(joao): only change print_logs, if possible.
         settings = SolverSettings(
-            η0=10.0,
-            η_update_factor=1.1,
+            η0=1.0,
+            η_update_factor=1.2,
             µ0=0.1,
             µ_update_factor=0.95,
             num_iterative_refinement_steps=1,
+            use_filter_line_search=True,
             print_logs=True,
             # print_ls_logs=True,
         )

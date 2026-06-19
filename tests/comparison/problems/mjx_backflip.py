@@ -25,8 +25,24 @@ def make_problem() -> ProblemSpec:
     }
     spec.metadata["sip_settings"].update(
         {
-            "initial_penalty_parameter": 1e5,
-            "penalty_parameter_increase_factor": 2.0,
+            "max_iterations": 20,
+            "penalty": {
+                "initial_penalty_parameter": 1e3,
+                "penalty_parameter_increase_factor": 1.1,
+            },
+            "barrier": {
+                "initial_mu": 1e-3,
+                "mu_update_factor": 0.95,
+            },
+            "regularization": {
+                "initial": 0.03,
+                "maximum": 1e12,
+                "max_attempts": 32,
+            },
+            "line_search": {
+                "enable_line_search_failures": True,
+                "max_iterations": 100000,
+            },
         }
     )
     return spec

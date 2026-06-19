@@ -265,6 +265,11 @@ def write_solution_archives(results: Iterable[SolverResult], out_dir: Path) -> N
         if r.X is None or r.U is None or r.Theta is None:
             continue
         path = out_dir / f"{_clean(r.problem_name)}__{_clean(r.solver_name)}.npz"
+        warm_start_arrays = {}
+        for key, value in (r.warm_start_out or {}).items():
+            if value is None:
+                continue
+            warm_start_arrays[f"warm_start__{key}"] = np.asarray(value)
         np.savez_compressed(
             path,
             X=np.asarray(r.X),
@@ -279,6 +284,7 @@ def write_solution_archives(results: Iterable[SolverResult], out_dir: Path) -> N
             ineq_violation_inf=np.asarray(r.ineq_violation_inf),
             success=np.asarray(r.success),
             notes=np.asarray(r.notes),
+            **warm_start_arrays,
         )
 
 

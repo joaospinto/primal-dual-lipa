@@ -6,9 +6,9 @@ process (so a hung solver can be SIGKILLed without taking down the
 whole pass), then pickles the resulting ``SolverResult`` to the
 ``--out-pickle`` path.
 
-Why subprocess isolation: most solvers (lipa, fatrop, csqp, sip,
+Why subprocess isolation: most solvers (lipa, fatrop, csqp,
 trajax, aligator, acados) have no native wall-time cap and can spin
-arbitrarily long if they hit a bad iterate. IPOPT honors
+arbitrarily long if they hit a bad iterate. IPOPT and SIP honor
 ``--timeout-s`` natively; for the rest, the parent process kills this
 subprocess at ``--hard-timeout-s`` (which should be set noticeably
 larger than ``--timeout-s`` so a solver that DOES honor the soft cap
@@ -38,6 +38,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tol", type=float, required=True)
     parser.add_argument("--timeout-s", type=float, default=None)
     parser.add_argument("--backend", type=str, default=None)
+    parser.add_argument(
+        "--problem-kwargs-json",
+        type=str,
+        default=None,
+        help="JSON-encoded extra kwargs dict for the problem factory.",
+    )
+    parser.add_argument(
+        "--metadata-json",
+        type=str,
+        default=None,
+        help="JSON-encoded metadata overlay for the constructed ProblemSpec.",
+    )
+    parser.add_argument(
+        "--initial-solution-npz",
+        type=Path,
+        default=None,
+        help="Saved solution archive whose X/U/Theta arrays replace the "
+        "constructed problem's primal warm start.",
+    )
     parser.add_argument(
         "--solver-kwargs-json",
         type=str,
@@ -76,6 +95,36 @@ def main(argv: list[str] | None = None) -> int:
                 pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
             return 2
 
+    problem_kwargs: dict = {}
+    if args.problem_kwargs_json:
+        try:
+            problem_kwargs = json.loads(args.problem_kwargs_json)
+        except json.JSONDecodeError as e:
+            result = make_failure_result(
+                args.solver,
+                args.problem,
+                f"run_one: bad --problem-kwargs-json: {e}",
+            )
+            args.out_pickle.parent.mkdir(parents=True, exist_ok=True)
+            with args.out_pickle.open("wb") as f:
+                pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
+            return 2
+
+    metadata_overlay: dict = {}
+    if args.metadata_json:
+        try:
+            metadata_overlay = json.loads(args.metadata_json)
+        except json.JSONDecodeError as e:
+            result = make_failure_result(
+                args.solver,
+                args.problem,
+                f"run_one: bad --metadata-json: {e}",
+            )
+            args.out_pickle.parent.mkdir(parents=True, exist_ok=True)
+            with args.out_pickle.open("wb") as f:
+                pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
+            return 2
+
     try:
         result: SolverResult = _run_one_in_process(
             args.solver,
@@ -83,10 +132,15 @@ def main(argv: list[str] | None = None) -> int:
             max_iter=args.max_iter,
             tol=args.tol,
             timeout_s=args.timeout_s,
-            verbose=False,  # parent already prints the header
+            # Keep subprocess logs self-contained. Hard-timeout MJX runs need
+            # phase-level progress to distinguish slow solves from hangs.
+            verbose=True,
             solver_verbose=args.solver_verbose,
             backend=args.backend,
             extra_kwargs=extra_kwargs,
+            problem_kwargs=problem_kwargs,
+            metadata_overlay=metadata_overlay,
+            initial_solution_npz=args.initial_solution_npz,
         )
     except Exception as e:  # noqa: BLE001
         # _run_one_in_process already catches per-adapter exceptions; any

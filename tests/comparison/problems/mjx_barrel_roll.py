@@ -42,9 +42,28 @@ def make_problem(N_override: int | None = None) -> ProblemSpec:
         "tests.mpc_examples.configs.config_barrel_roll",
         name="barrel_roll",
     )
-    spec.metadata["sip_jax_settings"] = dict(
-        penalty_parameter_increase_factor=1.1,
-        mu_update_factor=0.9,
-        initial_mu=1e-3,
-    )
+    spec.metadata["sip_jax_settings"] = {
+        "penalty": {
+            "initial_penalty_parameter": 1e9,
+            "penalty_parameter_increase_factor": 1.1,
+        },
+        "barrier": {
+            "initial_mu": 1e-2,
+            "mu_update_factor": 0.9,
+        },
+        "regularization": {
+            "initial": 0.03,
+            "maximum": 1e12,
+            "max_attempts": 32,
+        },
+    }
+    spec.metadata["sip_two_phase"] = True
+    spec.metadata["sip_warmup_settings"] = {
+        "max_iterations": 100,
+        "termination": {
+            "max_dual_residual": 1.0,
+            "max_constraint_violation": 1e-3,
+            "max_complementarity_gap": 1e-3,
+        },
+    }
     return spec

@@ -5,11 +5,17 @@ from functools import partial
 import jax
 from jax import numpy as jnp
 
-from primal_dual_lipa.kkt_builder import build_kkt, build_kkt_rhs
+from primal_dual_lipa.kkt_builder import (
+    add_scalar_hessian_regularization_delta,
+    build_kkt,
+    build_kkt_rhs,
+)
 from primal_dual_lipa.kkt_helpers import (
     compute_kkt_residual,
+    factorization_is_valid,
     factor_kkt,
     solve_kkt,
+    tree_all_finite,
 )
 from primal_dual_lipa.lagrangian_helpers import directional_augmented_lagrangian, pad
 from primal_dual_lipa.types import (
@@ -95,6 +101,12 @@ def solve(
             µ=settings.µ0, η_dyn=η_dyn, η_eq=η_eq, η_ineq=η_ineq
         )
 
+    hess_reg_settings = settings.hessian_regularization
+    hessian_regularization_current = jnp.maximum(
+        hess_reg_settings.initial,
+        hess_reg_settings.minimum,
+    )
+
     kkt_system = build_kkt(
         cost=cost,
         dynamics=dynamics,
@@ -103,11 +115,15 @@ def solve(
         x0=x0,
         vars=vars_current,
         params=params_current,
+        hessian_regularization=hessian_regularization_current,
+        regularize_slack_elimination_with_mu=(
+            settings.regularize_slack_elimination_with_mu
+        ),
     )
 
     if settings.print_logs and not settings.print_ls_logs:
         jax.debug.print(
-            "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(  # noqa: E501
+            "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(  # noqa: E501
                 "iteration",
                 "α",
                 "cost",
@@ -124,6 +140,8 @@ def solve(
                 "|dθ|",
                 "avg(η)",
                 "µ",
+                "δH",
+                "δH it",
                 "linsys_res",
             ),
             ordered=True,
@@ -139,12 +157,14 @@ def solve(
             jnp.double,
             jnp.double,
             jnp.double,
+            jnp.double,
         ],
     ) -> tuple[
         Variables,
         Parameters,
         KKTSystem,
         jnp.int32,
+        jnp.double,
         jnp.double,
         jnp.double,
         jnp.double,
@@ -161,24 +181,139 @@ def solve(
             # so the very first iterate is unconditionally acceptable.
             filter_theta,
             filter_f,
+            hessian_regularization,
         ) = inputs
 
-        factorization_outputs = factor_kkt(
-            inputs=kkt_system.lhs,
-            use_parallel_lqr=settings.use_parallel_lqr,
-        )
+        τ = jnp.maximum(settings.τ_min, 1.0 - params.µ)
 
-        deltas = solve_kkt(
-            factorization_outputs=factorization_outputs,
-            factorization_inputs=kkt_system.lhs,
-            rhs=kkt_system.rhs,
-            use_parallel_lqr=settings.use_parallel_lqr,
+        def solve_trial(
+            trial_kkt_system: KKTSystem,
+        ) -> tuple[object, Variables, jax.Array]:
+            trial_factorization_outputs = factor_kkt(
+                inputs=trial_kkt_system.lhs,
+                use_parallel_lqr=settings.use_parallel_lqr,
+            )
+            trial_deltas = solve_kkt(
+                factorization_outputs=trial_factorization_outputs,
+                factorization_inputs=trial_kkt_system.lhs,
+                rhs=trial_kkt_system.rhs,
+                use_parallel_lqr=settings.use_parallel_lqr,
+            )
+            valid = jnp.logical_and(
+                factorization_is_valid(
+                    trial_factorization_outputs,
+                    pd_tol=hess_reg_settings.pd_tol,
+                    singular_tol=hess_reg_settings.singular_tol,
+                ),
+                tree_all_finite(trial_deltas),
+            )
+            trial_dal = directional_augmented_lagrangian(
+                cost=cost,
+                dynamics=dynamics,
+                equalities=equalities,
+                inequalities=inequalities,
+                x0=x0,
+                params=params,
+                τ=τ,
+                T=T,
+                vars=vars,
+                deltas=trial_deltas,
+            )
+            trial_merit_grad = jax.grad(trial_dal)(0.0)
+            descent_valid = trial_merit_grad < -hess_reg_settings.descent_tol
+            valid = jnp.logical_and(
+                valid,
+                jnp.logical_and(jnp.isfinite(trial_merit_grad), descent_valid),
+            )
+            return trial_factorization_outputs, trial_deltas, valid
+
+        factorization_outputs, deltas, regularization_valid = solve_trial(kkt_system)
+
+        def next_hessian_regularization(reg: jax.Array) -> jax.Array:
+            from_zero = jnp.where(
+                hess_reg_settings.minimum > 0.0,
+                hess_reg_settings.minimum,
+                hess_reg_settings.first_positive,
+            )
+            increased = jnp.where(
+                reg >= hess_reg_settings.first_positive,
+                reg * hess_reg_settings.increase_factor,
+                from_zero,
+            )
+            return jnp.minimum(increased, hess_reg_settings.maximum)
+
+        def regularization_loop_cond(
+            state: tuple[
+                jnp.double,
+                jnp.int32,
+                KKTSystem,
+                object,
+                Variables,
+                jnp.bool,
+            ],
+        ) -> jnp.bool:
+            reg, attempt, _trial_kkt, _factorization, _deltas, valid = state
+            can_try_more = jnp.logical_and(
+                attempt < hess_reg_settings.max_attempts,
+                reg < hess_reg_settings.maximum,
+            )
+            return jnp.logical_and(jnp.logical_not(valid), can_try_more)
+
+        def regularization_loop_body(
+            state: tuple[
+                jnp.double,
+                jnp.int32,
+                KKTSystem,
+                object,
+                Variables,
+                jnp.bool,
+            ],
+        ) -> tuple[jnp.double, jnp.int32, KKTSystem, object, Variables, jnp.bool]:
+            reg, attempt, _trial_kkt, _factorization, _deltas, _valid = state
+            reg_new = next_hessian_regularization(reg)
+            trial_kkt_system = add_scalar_hessian_regularization_delta(
+                _trial_kkt,
+                reg_new - reg,
+            )
+            trial_factorization_outputs, trial_deltas, valid = solve_trial(
+                trial_kkt_system
+            )
+            return (
+                reg_new,
+                attempt + 1,
+                trial_kkt_system,
+                trial_factorization_outputs,
+                trial_deltas,
+                valid,
+            )
+
+        (
+            hessian_regularization_used,
+            regularization_attempts,
+            kkt_system,
+            factorization_outputs,
+            deltas,
+            regularization_valid,
+        ) = jax.lax.while_loop(
+            regularization_loop_cond,
+            regularization_loop_body,
+            (
+                hessian_regularization,
+                jnp.array(0, dtype=jnp.int32),
+                kkt_system,
+                factorization_outputs,
+                deltas,
+                regularization_valid,
+            ),
         )
 
         def iterative_refinement_loop_continuation_criteria(
             x: tuple[Variables, jnp.int32],
         ) -> jnp.bool:
-            return x[-1] < settings.num_iterative_refinement_steps
+            return jnp.logical_and(
+                regularization_valid,
+                x[-1] < settings.num_iterative_refinement_steps,
+            )
 
         def iterative_refinement_loop_body(
             x: tuple[Variables, jnp.int32],
@@ -215,8 +350,10 @@ def solve(
             iterative_refinement_loop_body,
             (deltas, 0),
         )
-
-        τ = jnp.maximum(settings.τ_min, 1.0 - params.µ)
+        regularization_valid = jnp.logical_and(
+            regularization_valid,
+            tree_all_finite(deltas),
+        )
 
         def compute_alpha_max(v, dv, τ):
             mask = dv < 0
@@ -469,7 +606,7 @@ def solve(
 
             if settings.print_ls_logs:
                 jax.debug.print(
-                    "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(  # noqa: E501
+                    "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(  # noqa: E501
                         "iteration",
                         "α",
                         "cost",
@@ -486,13 +623,15 @@ def solve(
                         "|dθ|",
                         "avg(η)",
                         "µ",
+                        "δH",
+                        "δH it",
                         "linsys_res",
                     ),
                     ordered=True,
                 )
 
             jax.debug.print(
-                "{:^+10} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g}",  # noqa: E501
+                "{:^+10} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10} {:^+10.4g}",  # noqa: E501
                 iteration,
                 α,
                 vectorize(cost)(vars.X, U_pad, vars.Theta, Tp1_range).sum(),
@@ -509,6 +648,8 @@ def solve(
                 jnp.linalg.norm(deltas.Theta),
                 avg_η,
                 params.µ,
+                hessian_regularization_used,
+                regularization_attempts,
                 jnp.linalg.norm(residual_vec),
                 ordered=True,
             )
@@ -528,7 +669,9 @@ def solve(
         # jumping iteration past max_iterations). This prevents propagation
         # when the KKT factorization or line search misbehaves on
         # ill-conditioned problems. The returned `no_errors` will be False.
-        nan_in_update = jnp.logical_not(
+        nan_in_update = jnp.logical_or(
+            jnp.logical_not(regularization_valid),
+            jnp.logical_not(
             jnp.all(jnp.isfinite(updated_vars.X))
             & jnp.all(jnp.isfinite(updated_vars.U))
             & jnp.all(jnp.isfinite(updated_vars.S))
@@ -536,6 +679,7 @@ def solve(
             & jnp.all(jnp.isfinite(updated_vars.Y_eq))
             & jnp.all(jnp.isfinite(updated_vars.Z))
             & jnp.all(jnp.isfinite(updated_vars.Theta))
+            ),
         )
         updated_vars = jax.tree_util.tree_map(
             lambda new, old: jnp.where(nan_in_update, old, new),
@@ -639,6 +783,20 @@ def solve(
             η_ineq=η_ineq_new,
         )
 
+        decreased_hessian_regularization = (
+            hessian_regularization_used * hess_reg_settings.decrease_factor
+        )
+        decreased_hessian_regularization = jnp.where(
+            decreased_hessian_regularization < hess_reg_settings.first_positive,
+            hess_reg_settings.minimum,
+            decreased_hessian_regularization,
+        )
+        hessian_regularization_new = jnp.where(
+            regularization_valid,
+            jnp.maximum(hess_reg_settings.minimum, decreased_hessian_regularization),
+            hessian_regularization_used,
+        )
+
         kkt_system_new = build_kkt(
             cost=cost,
             dynamics=dynamics,
@@ -647,6 +805,10 @@ def solve(
             x0=x0,
             vars=updated_vars,
             params=updated_params,
+            hessian_regularization=hessian_regularization_new,
+            regularize_slack_elimination_with_mu=(
+                settings.regularize_slack_elimination_with_mu
+            ),
         )
 
         # On NaN we already reverted vars; jump iteration past max_iterations
@@ -684,6 +846,7 @@ def solve(
             last_improvement,
             filter_theta_new,
             filter_f_new,
+            hessian_regularization_new,
         )
 
     def main_loop_continuation_criteria(
@@ -692,6 +855,7 @@ def solve(
             Parameters,
             KKTSystem,
             jnp.int32,
+            jnp.double,
             jnp.double,
             jnp.double,
             jnp.double,
@@ -707,6 +871,7 @@ def solve(
             last_improvement,
             _filter_theta,
             _filter_f,
+            _hessian_regularization,
         ) = inputs
 
         residual = jnp.concatenate(
@@ -763,6 +928,7 @@ def solve(
         _final_improvement,
         _final_filter_theta,
         _final_filter_f,
+        _final_hessian_regularization,
     ) = jax.lax.while_loop(
         main_loop_continuation_criteria,
         main_loop_body,
@@ -777,6 +943,7 @@ def solve(
             # unconditionally acceptable (no prior history to compare to).
             jnp.array(jnp.inf, dtype=jnp.float64),
             jnp.array(jnp.inf, dtype=jnp.float64),
+            hessian_regularization_current,
         ),
     )
 

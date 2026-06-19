@@ -16,7 +16,41 @@ import numpy as np
 from tests.comparison.problem_spec import ProblemSpec
 
 
-def build_mjx_problem(config_module: str, name: str) -> ProblemSpec:
+def _h1_kinodynamic_control_warm_start(config, reference, model) -> jax.Array:
+    """Initialize H1 controls from the reference motion and contact schedule."""
+    n_joints = int(config.n_joints)
+    n_contact = int(config.n_contact)
+    T = int(config.N)
+    dt = float(config.dt)
+
+    q_ref = reference[:, 7 : 7 + n_joints]
+    dq_cmd = (q_ref[1 : T + 1] - q_ref[:T]) / dt
+
+    z_ref = reference[:, 2]
+    vz_ref = (z_ref[1 : T + 1] - z_ref[:T]) / dt
+    vz_next = jnp.concatenate([vz_ref[1:], vz_ref[-1:]])
+    az_ref = (vz_next - vz_ref) / dt
+
+    contact = reference[
+        :T,
+        13 + n_joints + 3 * n_contact : 13 + n_joints + 4 * n_contact,
+    ]
+    active_contacts = jnp.maximum(jnp.sum(contact, axis=1, keepdims=True), 1.0)
+    total_mass = float(np.sum(np.asarray(model.body_mass)))
+    total_fz = jnp.maximum(total_mass * (9.81 + az_ref), 0.0)[:, None]
+    fz_per_contact = contact * total_fz / active_contacts
+
+    grf = jnp.zeros((T, 3 * n_contact), dtype=reference.dtype)
+    grf = grf.at[:, 2::3].set(fz_per_contact)
+    return jnp.concatenate([dq_cmd, grf], axis=1)
+
+
+def build_mjx_problem(
+    config_module: str,
+    name: str,
+    *,
+    control_warm_start: str | None = None,
+) -> ProblemSpec:
     """Build a ProblemSpec from one of the existing MJX configs."""
     import importlib
 
@@ -106,6 +140,8 @@ def build_mjx_problem(config_module: str, name: str) -> ProblemSpec:
         reference[:, : 13 + config.n_joints]
     )
     U_init = jnp.tile(config.u_ref, (config.N, 1))
+    if control_warm_start == "h1_kinodynamic":
+        U_init = _h1_kinodynamic_control_warm_start(config, reference, model)
 
     # LIPA-style stage signature: (x, u, theta, t).
     # The MJX cost / dyn / ineq have their own signatures — wrap them.
@@ -146,17 +182,27 @@ def build_mjx_problem(config_module: str, name: str) -> ProblemSpec:
         # SIP defaults inherited from the historical sip_mjx adapter;
         # individual problems can override via dict.update below.
         "sip_settings": {
-            "initial_penalty_parameter": 1e9,
-            "initial_mu": 1e-2,
-            "penalty_parameter_increase_factor": 1.1,
-            "mu_update_factor": 0.95,
-            "enable_line_search_failures": True,
-            "max_ls_iterations": 100000,
+            "penalty": {
+                "initial_penalty_parameter": 1e9,
+                "penalty_parameter_increase_factor": 1.1,
+            },
+            "barrier": {
+                "initial_mu": 1e-2,
+                "mu_update_factor": 0.95,
+            },
+            "line_search": {
+                "enable_line_search_failures": True,
+                "max_iterations": 100000,
+            },
         },
     }
     if enforce_ineq:
         # Phase 2: smooth cost, constrained solve.
         cost_smooth = getattr(config, "cost_smooth", None)
+        original_cost = lambda x, u, theta, t: config.cost(  # noqa: ARG005, E731
+            config.W, reference, x, u, t
+        )
+        metadata["warmup_cost"] = jax.jit(original_cost)
         if cost_smooth is not None:
 
             def lipa_cost(x, u, theta, t):  # noqa: ARG001
@@ -175,12 +221,8 @@ def build_mjx_problem(config_module: str, name: str) -> ProblemSpec:
             # run_benchmark.py; each solver opts in per-problem via the
             # flat ``<solver_root>_two_phase: True`` metadata flag and
             # can ship per-phase schedules via ``<solver>_warmup_settings``.
-            original_cost = lambda x, u, theta, t: config.cost(  # noqa: ARG005, E731
-                config.W, reference, x, u, t
-            )
             metadata["lipa_two_phase"] = True
             metadata["aligator_two_phase"] = True
-            metadata["warmup_cost"] = jax.jit(original_cost)
             metadata["lipa_warmup_settings"] = base_settings
             metadata["fatrop_mjx_settings"] = {
                 "warm_start_init_point": True,
