@@ -14,9 +14,9 @@ jax.config.update("jax_enable_x64", True)
 
 # Persistent JAX/XLA compilation cache across subprocess runs. The MJX
 # problems take 30-300s to JIT-compile from a cold cache; with the
-# cache populated, each subsequent solve of the same problem skips
-# that compile entirely. Subprocess-per-pair isolation in the runner
-# would otherwise force a full recompile every time.
+# cache populated, each subsequent solve of the same problem can reuse
+# the compiled XLA artifact. Fresh subprocesses still pay tracing and
+# lowering costs, but avoid the heaviest codegen work.
 # Override path via ``JAX_COMPILATION_CACHE_DIR`` env var if needed.
 _cache_dir = os.environ.get(
     "JAX_COMPILATION_CACHE_DIR",

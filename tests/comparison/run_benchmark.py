@@ -366,15 +366,12 @@ def _subprocess_env(problem_name: str) -> dict[str, str] | None:
     xla_flags = os.environ.get("XLA_FLAGS", "")
     cpu_flag = "--xla_cpu_multi_thread_eigen=false"
     needs_xla_flag = cpu_flag not in xla_flags.split()
-    needs_cache_disable = "JAX_COMPILATION_CACHE_DIR" not in os.environ
-    if not needs_xla_flag and not needs_cache_disable:
+    if not needs_xla_flag:
         return None
 
     child_env = os.environ.copy()
     if needs_xla_flag:
         child_env["XLA_FLAGS"] = f"{xla_flags} {cpu_flag}".strip()
-    if needs_cache_disable:
-        child_env["JAX_COMPILATION_CACHE_DIR"] = ""
     return child_env
 
 
