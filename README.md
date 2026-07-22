@@ -35,64 +35,6 @@ Here are some ways in which we improve on these libraries:
 | Consistent $\rho$ in LS and KKT | ✅       | ❌      | ✅   |
 | Rooted-tree OCPs                | ❌       | ❌      | ✅   |
 
-## Rooted-tree OCPs
-
-LIPA supports arbitrary directed rooted trees through `solve_tree`. Build the
-topology and callback-location sets once on the host and reuse them across
-solves:
-
-```python
-import jax.numpy as jnp
-
-from primal_dual_lipa.optimizers import solve_tree
-from primal_dual_lipa.topology import make_tree_ocp_topology
-from primal_dual_lipa.types import NodeAndEdgeIndices, OCPCallbackLocations
-
-topology = make_tree_ocp_topology(
-    [-1, 0, 0, 1, 1],
-    use_parallel_lqr=settings.use_parallel_lqr,
-)
-locations = OCPCallbackLocations(
-    cost=NodeAndEdgeIndices(node=jnp.array([3, 4]), edge=jnp.arange(4)),
-    equalities=NodeAndEdgeIndices(
-        node=jnp.array([3, 4]), edge=jnp.empty(0, dtype=jnp.int32)
-    ),
-    inequalities=NodeAndEdgeIndices(
-        node=jnp.empty(0, dtype=jnp.int32), edge=jnp.arange(4)
-    ),
-)
-solution, iterations, no_errors, parameters = solve_tree(
-    vars_in=initial_variables,
-    x0=x0,
-    dynamics=dynamics,
-    settings=settings,
-    node_cost=node_cost,
-    edge_cost=edge_cost,
-    node_equalities=node_equalities,
-    edge_equalities=edge_equalities,
-    node_inequalities=node_inequalities,
-    edge_inequalities=edge_inequalities,
-    topology=topology,
-    locations=locations,
-)
-```
-
-For `V` nodes and `E=V-1` edges, `X` and `Y_dyn` are node-ordered, while `U`
-is ordered by `topology.plan.edge_children`. Costs and constraints are explicit
-node or edge callbacks: node callbacks receive `(x, theta, node)`, while edge
-callbacks receive `(x_parent, u, theta, edge)`. `S`, `Y_eq`, and `Z` are
-`NodeAndEdgeValues` pytrees whose rows follow the order of the selected
-equality or inequality locations; their `.node` and `.edge` arrays may have
-different constraint widths. Cost, equality, and inequality locations are
-independent, so callbacks and KKT blocks are built only where they are active.
-Omitting `locations` selects every node and edge. Dynamics always uses the edge
-callback signature and is evaluated on every edge.
-
-For conventional chain problems, `solve` retains the simpler stage-wise API:
-one `(x, u, theta, t)` callback per cost or constraint and flat `Variables`
-arrays with `T+1` local-stage rows. Internally, its first `T` stages become edge
-blocks and its terminal stage becomes a node block in the same tree solver.
-
 ## Benchmark vs. other OCP solvers
 
 The table below summarises iteration counts on a head-to-head benchmark against
@@ -194,6 +136,64 @@ optimizes the trajectory of a quadpendulum to reach a target goal-state,
 while imposing some control bounds.
 
 https://github.com/user-attachments/assets/25efb120-253e-48b0-ac14-1dd38f385334
+
+## Rooted-tree OCPs
+
+LIPA supports arbitrary directed rooted trees through `solve_tree`. Build the
+topology and callback-location sets once on the host and reuse them across
+solves:
+
+```python
+import jax.numpy as jnp
+
+from primal_dual_lipa.optimizers import solve_tree
+from primal_dual_lipa.topology import make_tree_ocp_topology
+from primal_dual_lipa.types import NodeAndEdgeIndices, OCPCallbackLocations
+
+topology = make_tree_ocp_topology(
+    [-1, 0, 0, 1, 1],
+    use_parallel_lqr=settings.use_parallel_lqr,
+)
+locations = OCPCallbackLocations(
+    cost=NodeAndEdgeIndices(node=jnp.array([3, 4]), edge=jnp.arange(4)),
+    equalities=NodeAndEdgeIndices(
+        node=jnp.array([3, 4]), edge=jnp.empty(0, dtype=jnp.int32)
+    ),
+    inequalities=NodeAndEdgeIndices(
+        node=jnp.empty(0, dtype=jnp.int32), edge=jnp.arange(4)
+    ),
+)
+solution, iterations, no_errors, parameters = solve_tree(
+    vars_in=initial_variables,
+    x0=x0,
+    dynamics=dynamics,
+    settings=settings,
+    node_cost=node_cost,
+    edge_cost=edge_cost,
+    node_equalities=node_equalities,
+    edge_equalities=edge_equalities,
+    node_inequalities=node_inequalities,
+    edge_inequalities=edge_inequalities,
+    topology=topology,
+    locations=locations,
+)
+```
+
+For `V` nodes and `E=V-1` edges, `X` and `Y_dyn` are node-ordered, while `U`
+is ordered by `topology.plan.edge_children`. Costs and constraints are explicit
+node or edge callbacks: node callbacks receive `(x, theta, node)`, while edge
+callbacks receive `(x_parent, u, theta, edge)`. `S`, `Y_eq`, and `Z` are
+`NodeAndEdgeValues` pytrees whose rows follow the order of the selected
+equality or inequality locations; their `.node` and `.edge` arrays may have
+different constraint widths. Cost, equality, and inequality locations are
+independent, so callbacks and KKT blocks are built only where they are active.
+Omitting `locations` selects every node and edge. Dynamics always uses the edge
+callback signature and is evaluated on every edge.
+
+For conventional chain problems, `solve` retains the simpler stage-wise API:
+one `(x, u, theta, t)` callback per cost or constraint and flat `Variables`
+arrays with `T+1` local-stage rows. Internally, its first `T` stages become edge
+blocks and its terminal stage becomes a node block in the same tree solver.
 
 ## Citing this work
 
