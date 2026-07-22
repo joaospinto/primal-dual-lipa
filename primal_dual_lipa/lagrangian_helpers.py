@@ -1,145 +1,336 @@
-"""Provides helper methods for computing the Lagrangian and Augmented Lagrangian."""
+"""Helpers for node/edge Lagrangians and augmented Lagrangians."""
 
 import jax
 from jax import numpy as jnp
 
-from primal_dual_lipa.types import CostFunction, Function, Parameters, Variables
-from primal_dual_lipa.vectorization_helpers import vectorize
+from primal_dual_lipa.topology import (
+    TreeOCPTopology,
+    edge_children,
+    edge_parents,
+    root_node,
+)
+from primal_dual_lipa.types import (
+    EdgeCostFunction,
+    EdgeFunction,
+    NodeAndEdgeIndices,
+    NodeAndEdgeValues,
+    NodeCostFunction,
+    NodeFunction,
+    OCPCallbackLocations,
+    TreeParameters,
+    TreeVariables,
+    node_edge_map,
+    node_edge_sum,
+)
+from primal_dual_lipa.vectorization_helpers import vectorize_edge, vectorize_node
 
 
 def pad(A: jax.Array) -> jax.Array:
-    """Pad with zeros along the first axis by an extra element."""
+    """Pad a time-indexed array by one zero row (legacy test helper)."""
     return jnp.pad(A, [[0, 1], [0, 0]])
 
 
-def build_lagrangian(  # noqa: ANN201
-    cost: CostFunction,
-    dynamics: Function,
-    equalities: Function,
-    inequalities: Function,
-    x0: jax.Array,
-    µ: jnp.double,
-):
-    """Return a function to evaluate the associated Lagrangian."""
+def build_node_equality_lagrangian(equalities: NodeFunction):  # noqa: ANN201
+    """Return the multiplier term for one selected node equality block."""
 
-    def lagrangian(
-        X: jax.Array,
-        U: jax.Array,
-        Theta: jax.Array,
-        t: jnp.int32,
-        S: jax.Array,
-        next_Y_dyn: jax.Array,
-        Y_dyn: jax.Array,
-        Y_eq: jax.Array,
-        Z: jax.Array,
-    ) -> jnp.double:
-        c1 = cost(X, U, Theta, t)
-        c2 = jnp.dot(next_Y_dyn, dynamics(X, U, Theta, t))
-        c3 = jnp.dot(Y_dyn, jax.lax.select(t == 0, x0 - X, -X))
-        c4 = -µ * jnp.sum(jnp.log(S))
-        c5 = jnp.dot(Y_eq, equalities(X, U, Theta, t))
-        c6 = jnp.dot(Z, inequalities(X, U, Theta, t) + S)
-        return c1 + c2 + c3 + c4 + c5 + c6
+    def lagrangian(x, theta, node, y_eq):  # noqa: ANN001, ANN202
+        return jnp.dot(y_eq, equalities(x, theta, node))
 
     return lagrangian
 
 
-def build_total_augmented_lagrangian(  # noqa: ANN201
-    cost: CostFunction,
-    dynamics: Function,
-    equalities: Function,
-    inequalities: Function,
-    x0: jax.Array,
-    params: Parameters,
-    T: jnp.int32,
+def build_node_inequality_lagrangian(  # noqa: ANN201
+    inequalities: NodeFunction, µ: jnp.double
 ):
-    """Return a function to evaluate the associated Augmented Lagrangian."""
-    lagrangian = build_lagrangian(
-        cost=cost,
-        dynamics=dynamics,
-        equalities=equalities,
-        inequalities=inequalities,
-        x0=x0,
-        µ=params.µ,
+    """Return the barrier/multiplier term for one selected node block."""
+
+    def lagrangian(x, theta, node, s, z):  # noqa: ANN001, ANN202
+        return -µ * jnp.sum(jnp.log(s)) + jnp.dot(z, inequalities(x, theta, node) + s)
+
+    return lagrangian
+
+
+def build_edge_equality_lagrangian(equalities: EdgeFunction):  # noqa: ANN201
+    """Return the multiplier term for one selected edge equality block."""
+
+    def lagrangian(x, u, theta, edge, y_eq):  # noqa: ANN001, ANN202
+        return jnp.dot(y_eq, equalities(x, u, theta, edge))
+
+    return lagrangian
+
+
+def build_edge_inequality_lagrangian(  # noqa: ANN201
+    inequalities: EdgeFunction, µ: jnp.double
+):
+    """Return the barrier/multiplier term for one selected edge block."""
+
+    def lagrangian(x, u, theta, edge, s, z):  # noqa: ANN001, ANN202
+        return -µ * jnp.sum(jnp.log(s)) + jnp.dot(
+            z, inequalities(x, u, theta, edge) + s
+        )
+
+    return lagrangian
+
+
+def build_dynamics_lagrangian(dynamics: EdgeFunction):  # noqa: ANN201
+    """Return the dynamics-multiplier term for one directed edge."""
+
+    def dynamics_lagrangian(
+        X_parent: jax.Array,
+        U: jax.Array,
+        Theta: jax.Array,
+        edge: jnp.int32,
+        Y_child: jax.Array,
+    ) -> jnp.double:
+        return jnp.dot(Y_child, dynamics(X_parent, U, Theta, edge))
+
+    return dynamics_lagrangian
+
+
+def evaluate_nodes(  # noqa: ANN201
+    fun: NodeCostFunction | NodeFunction,
+    X: jax.Array,
+    Theta: jax.Array,
+    indices: jax.Array,
+):
+    """Evaluate a callback at selected nodes, preserving selection order."""
+    return vectorize_node(fun)(X[indices], Theta, indices)
+
+
+def evaluate_edges(  # noqa: ANN201
+    fun: EdgeCostFunction | EdgeFunction,
+    X: jax.Array,
+    U: jax.Array,
+    Theta: jax.Array,
+    topology: TreeOCPTopology | None,
+    indices: jax.Array,
+):
+    """Evaluate a callback at selected edges, preserving selection order."""
+    parents = edge_parents(topology, U.shape[0])
+    return vectorize_edge(fun)(X[parents[indices]], U[indices], Theta, indices)
+
+
+def evaluate_node_edge(
+    node_fun: NodeCostFunction | NodeFunction,
+    edge_fun: EdgeCostFunction | EdgeFunction,
+    X: jax.Array,
+    U: jax.Array,
+    Theta: jax.Array,
+    topology: TreeOCPTopology | None,
+    locations: NodeAndEdgeIndices,
+) -> NodeAndEdgeValues:
+    """Evaluate callbacks at explicitly selected node and edge locations."""
+    return NodeAndEdgeValues(
+        node=evaluate_nodes(node_fun, X, Theta, locations.node),
+        edge=evaluate_edges(edge_fun, X, U, Theta, topology, locations.edge),
     )
 
-    T_range = jnp.arange(T)
-    Tp1_range = jnp.arange(T + 1)
 
-    def augmented_lagrangian(
-        vars: Variables,
-    ) -> jnp.double:
-        U_pad = pad(vars.U)
-        next_Y_dyn = pad(vars.Y_dyn[1:])
-        c1 = jnp.sum(
-            vectorize(lagrangian)(
-                vars.X,
-                U_pad,
-                vars.Theta,
-                Tp1_range,
-                vars.S,
-                next_Y_dyn,
-                vars.Y_dyn,
-                vars.Y_eq,
-                vars.Z,
+def evaluate_dynamics(  # noqa: ANN201
+    dynamics: EdgeFunction,
+    X: jax.Array,
+    U: jax.Array,
+    Theta: jax.Array,
+    topology: TreeOCPTopology | None,
+):
+    """Evaluate dynamics once per edge in contraction-plan edge order."""
+    indices = jnp.arange(U.shape[0], dtype=jnp.int32)
+    return evaluate_edges(dynamics, X, U, Theta, topology, indices)
+
+
+def dynamics_residuals(
+    dynamics: EdgeFunction,
+    x0: jax.Array,
+    variables: TreeVariables,
+    topology: TreeOCPTopology | None,
+) -> jax.Array:
+    """Return root/edge dynamics defects in node order."""
+    children = edge_children(topology, variables.U.shape[0])
+    root = root_node(topology)
+    residuals = -variables.X
+    residuals = residuals.at[root].add(x0)
+    return residuals.at[children].add(
+        evaluate_dynamics(dynamics, variables.X, variables.U, variables.Theta, topology)
+    )
+
+
+def build_total_augmented_lagrangian(  # noqa: ANN201
+    node_cost: NodeCostFunction,
+    edge_cost: EdgeCostFunction,
+    dynamics: EdgeFunction,
+    node_equalities: NodeFunction,
+    edge_equalities: EdgeFunction,
+    node_inequalities: NodeFunction,
+    edge_inequalities: EdgeFunction,
+    x0: jax.Array,
+    params: TreeParameters,
+    topology: TreeOCPTopology | None,
+    locations: OCPCallbackLocations,
+):
+    """Return a function evaluating the associated augmented Lagrangian."""
+    node_equality_lagrangian = build_node_equality_lagrangian(node_equalities)
+    node_inequality_lagrangian = build_node_inequality_lagrangian(
+        node_inequalities, params.µ
+    )
+    edge_equality_lagrangian = build_edge_equality_lagrangian(edge_equalities)
+    edge_inequality_lagrangian = build_edge_inequality_lagrangian(
+        edge_inequalities, params.µ
+    )
+    dynamics_lagrangian = build_dynamics_lagrangian(dynamics)
+
+    def augmented_lagrangian(variables: TreeVariables) -> jnp.double:
+        num_edges = variables.U.shape[0]
+        parents = edge_parents(topology, num_edges)
+        children = edge_children(topology, num_edges)
+        root = root_node(topology)
+        edge_indices = jnp.arange(num_edges, dtype=jnp.int32)
+        local_cost = node_edge_sum(
+            evaluate_node_edge(
+                node_cost,
+                edge_cost,
+                variables.X,
+                variables.U,
+                variables.Theta,
+                topology,
+                locations.cost,
             )
         )
-        c2 = 0.5 * jnp.sum(
-            params.η_eq
-            * jnp.square(vectorize(equalities)(vars.X, U_pad, vars.Theta, Tp1_range))
+        local_node_equality = vectorize_node(node_equality_lagrangian)(
+            variables.X[locations.equalities.node],
+            variables.Theta,
+            locations.equalities.node,
+            variables.Y_eq.node,
+        ).sum()
+        local_node_inequality = vectorize_node(node_inequality_lagrangian)(
+            variables.X[locations.inequalities.node],
+            variables.Theta,
+            locations.inequalities.node,
+            variables.S.node,
+            variables.Z.node,
+        ).sum()
+        equality_edges = locations.equalities.edge
+        local_edge_equality = vectorize_edge(edge_equality_lagrangian)(
+            variables.X[parents[equality_edges]],
+            variables.U[equality_edges],
+            variables.Theta,
+            equality_edges,
+            variables.Y_eq.edge,
+        ).sum()
+        inequality_edges = locations.inequalities.edge
+        local_edge_inequality = vectorize_edge(edge_inequality_lagrangian)(
+            variables.X[parents[inequality_edges]],
+            variables.U[inequality_edges],
+            variables.Theta,
+            inequality_edges,
+            variables.S.edge,
+            variables.Z.edge,
+        ).sum()
+        dynamics_term = vectorize_edge(dynamics_lagrangian)(
+            variables.X[parents],
+            variables.U,
+            variables.Theta,
+            edge_indices,
+            variables.Y_dyn[children],
+        ).sum()
+        state_term = -jnp.sum(variables.Y_dyn * variables.X) + jnp.dot(
+            variables.Y_dyn[root], x0
         )
-        c3 = 0.5 * jnp.sum(
-            params.η_ineq
-            * jnp.square(
-                vectorize(inequalities)(vars.X, U_pad, vars.Theta, Tp1_range) + vars.S
-            )
+
+        dyn_residual = dynamics_residuals(dynamics, x0, variables, topology)
+        dyn_penalty = 0.5 * jnp.sum(params.η_dyn * jnp.square(dyn_residual))
+        equality_residual = evaluate_node_edge(
+            node_equalities,
+            edge_equalities,
+            variables.X,
+            variables.U,
+            variables.Theta,
+            topology,
+            locations.equalities,
         )
-        c4 = 0.5 * jnp.sum(
-            params.η_dyn[1:]
-            * jnp.square(
-                vectorize(dynamics)(vars.X[:-1], vars.U, vars.Theta, T_range)
-                - vars.X[1:]
-            )
+        equality_penalty = 0.5 * (
+            jnp.sum(params.η_eq.node * jnp.square(equality_residual.node))
+            + jnp.sum(params.η_eq.edge * jnp.square(equality_residual.edge))
         )
-        c5 = 0.5 * jnp.sum(params.η_dyn[0] * jnp.square(x0 - vars.X[0]))
-        return c1 + c2 + c3 + c4 + c5
+        inequality_residual = node_edge_map(
+            lambda value, slack: value + slack,
+            evaluate_node_edge(
+                node_inequalities,
+                edge_inequalities,
+                variables.X,
+                variables.U,
+                variables.Theta,
+                topology,
+                locations.inequalities,
+            ),
+            variables.S,
+        )
+        inequality_penalty = 0.5 * (
+            jnp.sum(params.η_ineq.node * jnp.square(inequality_residual.node))
+            + jnp.sum(params.η_ineq.edge * jnp.square(inequality_residual.edge))
+        )
+        return (
+            local_cost
+            + local_node_equality
+            + local_node_inequality
+            + local_edge_equality
+            + local_edge_inequality
+            + dynamics_term
+            + state_term
+            + dyn_penalty
+            + equality_penalty
+            + inequality_penalty
+        )
 
     return augmented_lagrangian
 
 
 def directional_augmented_lagrangian(  # noqa: ANN201
-    cost: CostFunction,
-    dynamics: Function,
-    equalities: Function,
-    inequalities: Function,
+    node_cost: NodeCostFunction,
+    edge_cost: EdgeCostFunction,
+    dynamics: EdgeFunction,
+    node_equalities: NodeFunction,
+    edge_equalities: EdgeFunction,
+    node_inequalities: NodeFunction,
+    edge_inequalities: EdgeFunction,
     x0: jax.Array,
-    params: Parameters,
+    params: TreeParameters,
     τ: jnp.double,
-    T: jnp.int32,
-    vars: Variables,
-    deltas: Variables,
+    topology: TreeOCPTopology | None,
+    locations: OCPCallbackLocations,
+    variables: TreeVariables,
+    deltas: TreeVariables,
 ):
-    """Define the directional Augmented Lagrangian used in the line search"""
+    """Define the directional augmented Lagrangian used in line search."""
     augmented_lagrangian = build_total_augmented_lagrangian(
-        cost=cost,
+        node_cost=node_cost,
+        edge_cost=edge_cost,
         dynamics=dynamics,
-        equalities=equalities,
-        inequalities=inequalities,
+        node_equalities=node_equalities,
+        edge_equalities=edge_equalities,
+        node_inequalities=node_inequalities,
+        edge_inequalities=edge_inequalities,
         x0=x0,
         params=params,
-        T=T,
+        topology=topology,
+        locations=locations,
     )
 
     def dal(α: jnp.double) -> jnp.double:
         return augmented_lagrangian(
-            Variables(
-                X=(vars.X + α * deltas.X),
-                U=(vars.U + α * deltas.U),
-                S=jnp.maximum(vars.S + α * deltas.S, (1.0 - τ) * vars.S),
-                Y_dyn=vars.Y_dyn,
-                Y_eq=vars.Y_eq,
-                Z=vars.Z,
-                Theta=(vars.Theta + α * deltas.Theta),
+            TreeVariables(
+                X=variables.X + α * deltas.X,
+                U=variables.U + α * deltas.U,
+                S=node_edge_map(
+                    lambda value, delta: jnp.maximum(
+                        value + α * delta, (1.0 - τ) * value
+                    ),
+                    variables.S,
+                    deltas.S,
+                ),
+                Y_dyn=variables.Y_dyn,
+                Y_eq=variables.Y_eq,
+                Z=variables.Z,
+                Theta=variables.Theta + α * deltas.Theta,
             )
         )
 

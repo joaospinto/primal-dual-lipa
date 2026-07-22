@@ -113,14 +113,75 @@ class SolverSettings:
     )
 
 
-Function = Callable[[jax.Array, jax.Array, jax.Array, jnp.int32], jax.Array]
-CostFunction = Callable[[jax.Array, jax.Array, jax.Array, jnp.int32], jnp.double]
+NodeFunction = Callable[[jax.Array, jax.Array, jnp.int32], jax.Array]
+NodeCostFunction = Callable[[jax.Array, jax.Array, jnp.int32], jnp.double]
+EdgeFunction = Callable[[jax.Array, jax.Array, jax.Array, jnp.int32], jax.Array]
+EdgeCostFunction = Callable[[jax.Array, jax.Array, jax.Array, jnp.int32], jnp.double]
+Function = EdgeFunction
+CostFunction = EdgeCostFunction
+
+
+@jax.tree_util.register_dataclass
+@dataclass
+class NodeAndEdgeValues:
+    """Values stored in independent node and edge row sets."""
+
+    node: jax.Array
+    edge: jax.Array
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class NodeAndEdgeIndices:
+    """Node and edge indices at which a callback is evaluated."""
+
+    node: jax.Array
+    edge: jax.Array
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class OCPCallbackLocations:
+    """Locations carrying cost, equality, and inequality callbacks."""
+
+    cost: NodeAndEdgeIndices
+    equalities: NodeAndEdgeIndices
+    inequalities: NodeAndEdgeIndices
+
+
+def node_edge_map(fun: Callable, *values: NodeAndEdgeValues) -> NodeAndEdgeValues:
+    """Apply ``fun`` to corresponding node and edge arrays."""
+    return NodeAndEdgeValues(
+        node=fun(*(value.node for value in values)),
+        edge=fun(*(value.edge for value in values)),
+    )
+
+
+def node_edge_flatten(value: NodeAndEdgeValues) -> jax.Array:
+    """Flatten and concatenate the node and edge arrays."""
+    return jnp.concatenate([value.node.reshape(-1), value.edge.reshape(-1)])
+
+
+def node_edge_sum(value: NodeAndEdgeValues) -> jax.Array:
+    """Sum all entries in the node and edge arrays."""
+    return jnp.sum(value.node) + jnp.sum(value.edge)
+
+
+@jax.tree_util.register_dataclass
+@dataclass
+class TreeParameters:
+    """Penalty parameters split into explicit node and edge blocks."""
+
+    µ: jnp.double
+    η_dyn: jax.Array
+    η_eq: NodeAndEdgeValues
+    η_ineq: NodeAndEdgeValues
 
 
 @jax.tree_util.register_dataclass
 @dataclass
 class Parameters:
-    """Encapsulate µ and η variables."""
+    """Penalty parameters for a chain's ``T + 1`` local stages."""
 
     µ: jnp.double
     η_dyn: jax.Array
@@ -133,19 +194,25 @@ class Parameters:
 class KKTFactorizationInputs:
     """Inputs to the KKT factorization."""
 
-    P: jax.Array
-    P_lqr: jax.Array
+    Q: jax.Array
+    M: jax.Array
+    R: jax.Array
+    Q_lqr: jax.Array
+    M_lqr: jax.Array
+    R_lqr: jax.Array
     D: jax.Array
-    E: jax.Array
-    G: jax.Array
-    w_inv: jax.Array
-    params: Parameters
+    E: NodeAndEdgeValues
+    G: NodeAndEdgeValues
+    w_inv: NodeAndEdgeValues
+    params: TreeParameters
     H_theta_theta: jax.Array
     H_theta_X: jax.Array
     H_theta_U: jax.Array
     H_theta_y_dyn: jax.Array
-    H_theta_y_eq: jax.Array
-    H_theta_z: jax.Array
+    H_theta_y_eq: NodeAndEdgeValues
+    H_theta_z: NodeAndEdgeValues
+    equality_locations: NodeAndEdgeIndices
+    inequality_locations: NodeAndEdgeIndices
 
 
 @jax.tree_util.register_dataclass
@@ -158,16 +225,30 @@ class KKTFactorizationOutputs:
     schur_complement: jax.Array
     B_inv_C_X: jax.Array
     B_inv_C_U: jax.Array
-    B_inv_C_S: jax.Array
+    B_inv_C_S: NodeAndEdgeValues
     B_inv_C_Y_dyn: jax.Array
-    B_inv_C_Y_eq: jax.Array
-    B_inv_C_Z: jax.Array
+    B_inv_C_Y_eq: NodeAndEdgeValues
+    B_inv_C_Z: NodeAndEdgeValues
+
+
+@jax.tree_util.register_dataclass
+@dataclass
+class TreeVariables:
+    """Variables with independent node and edge constraint blocks."""
+
+    X: jax.Array
+    U: jax.Array
+    S: NodeAndEdgeValues
+    Y_dyn: jax.Array
+    Y_eq: NodeAndEdgeValues
+    Z: NodeAndEdgeValues
+    Theta: jax.Array
 
 
 @jax.tree_util.register_dataclass
 @dataclass
 class Variables:
-    """Generic variables container."""
+    """Variables for a chain's ``T + 1`` local stages."""
 
     X: jax.Array
     U: jax.Array
@@ -184,4 +265,4 @@ class KKTSystem:
     """Encapsulate the KKT system (LHS and RHS)."""
 
     lhs: KKTFactorizationInputs
-    rhs: Variables
+    rhs: TreeVariables

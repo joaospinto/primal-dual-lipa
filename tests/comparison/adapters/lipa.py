@@ -11,7 +11,6 @@ import numpy as np
 
 from primal_dual_lipa.optimizers import solve as lipa_solve
 from primal_dual_lipa.types import Parameters, SolverSettings, Variables
-
 from tests.comparison.adapters import register
 from tests.comparison.adapters.base import SolverAdapter
 from tests.comparison.problem_spec import (

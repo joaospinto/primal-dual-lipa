@@ -3,15 +3,15 @@
 import jax
 from jax import numpy as jnp
 
-from primal_dual_lipa.types import Function
+from primal_dual_lipa.types import EdgeFunction
 
 
-def euler(dynamics: Function, dt: jnp.double) -> Function:
+def euler(dynamics: EdgeFunction, dt: jnp.double) -> EdgeFunction:
     """Apply Euler transcription."""
     return lambda x, u, theta, t: x + dt * dynamics(x, u, theta, t)
 
 
-def midpoint(dynamics: Function, dt: jnp.double) -> Function:
+def midpoint(dynamics: EdgeFunction, dt: jnp.double) -> EdgeFunction:
     """Apply midpoint transcription."""
 
     def integrator(
@@ -25,7 +25,7 @@ def midpoint(dynamics: Function, dt: jnp.double) -> Function:
     return integrator
 
 
-def rk4(dynamics: Function, dt: jnp.double) -> Function:
+def rk4(dynamics: EdgeFunction, dt: jnp.double) -> EdgeFunction:
     """Apply Runge-Kutta 4 transcription."""
 
     def integrator(
@@ -42,7 +42,7 @@ def rk4(dynamics: Function, dt: jnp.double) -> Function:
 
 
 def rollout(
-    dynamics: Function, U: jax.Array, x0: jax.Array, theta: jax.Array
+    dynamics: EdgeFunction, U: jax.Array, x0: jax.Array, theta: jax.Array
 ) -> jax.Array:
     """Rollout the dynamics for a control sequence."""
 

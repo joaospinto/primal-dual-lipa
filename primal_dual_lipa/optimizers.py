@@ -12,92 +12,226 @@ from primal_dual_lipa.kkt_builder import (
 )
 from primal_dual_lipa.kkt_helpers import (
     compute_kkt_residual,
-    factorization_is_valid,
     factor_kkt,
+    factorization_is_valid,
     solve_kkt,
     tree_all_finite,
 )
-from primal_dual_lipa.lagrangian_helpers import directional_augmented_lagrangian, pad
+from primal_dual_lipa.lagrangian_helpers import (
+    directional_augmented_lagrangian,
+    dynamics_residuals,
+    evaluate_node_edge,
+)
+from primal_dual_lipa.topology import (
+    TreeOCPTopology,
+    validate_callback_locations,
+    validate_tree_shapes,
+)
 from primal_dual_lipa.types import (
     CostFunction,
+    EdgeCostFunction,
+    EdgeFunction,
     Function,
     KKTSystem,
+    NodeAndEdgeIndices,
+    NodeAndEdgeValues,
+    NodeCostFunction,
+    NodeFunction,
+    OCPCallbackLocations,
     Parameters,
     SolverSettings,
+    TreeParameters,
+    TreeVariables,
     Variables,
+    node_edge_flatten,
+    node_edge_map,
+    node_edge_sum,
 )
-from primal_dual_lipa.vectorization_helpers import vectorize
+
+
+def _zero_node_cost(x, theta, node):  # noqa: ANN001, ANN202
+    del x, theta, node
+    return 0.0
+
+
+def _zero_edge_cost(x, u, theta, edge):  # noqa: ANN001, ANN202
+    del x, u, theta, edge
+    return 0.0
+
+
+def _empty_node_function(x, theta, node):  # noqa: ANN001, ANN202
+    del x, theta, node
+    return jnp.empty(0)
+
+
+def _empty_edge_function(x, u, theta, edge):  # noqa: ANN001, ANN202
+    del x, u, theta, edge
+    return jnp.empty(0)
+
+
+def _all_callback_locations(num_nodes: int, num_edges: int) -> OCPCallbackLocations:
+    """Select every node and edge for all three callback categories."""
+    all_locations = NodeAndEdgeIndices(
+        node=jnp.arange(num_nodes, dtype=jnp.int32),
+        edge=jnp.arange(num_edges, dtype=jnp.int32),
+    )
+    return OCPCallbackLocations(
+        cost=all_locations,
+        equalities=all_locations,
+        inequalities=all_locations,
+    )
 
 
 @partial(
     jax.jit,
     static_argnames=[
-        "cost",
+        "node_cost",
+        "edge_cost",
         "dynamics",
-        "equalities",
-        "inequalities",
+        "node_equalities",
+        "edge_equalities",
+        "node_inequalities",
+        "edge_inequalities",
     ],
 )
-def solve(
-    vars_in: Variables,
+def _solve_node_edge(
+    vars_in: TreeVariables,
     x0: jax.Array,
-    cost: CostFunction,
-    dynamics: Function,
+    dynamics: EdgeFunction,
     settings: SolverSettings,
-    equalities: Function = lambda x, u, theta, t: jnp.empty(0),
-    inequalities: Function = lambda x, u, theta, t: jnp.empty(0),
-    params_in: Parameters | None = None,
-) -> tuple[Variables, jnp.int32, jnp.bool, Parameters]:
+    *,
+    node_cost: NodeCostFunction = _zero_node_cost,
+    edge_cost: EdgeCostFunction = _zero_edge_cost,
+    node_equalities: NodeFunction = _empty_node_function,
+    edge_equalities: EdgeFunction = _empty_edge_function,
+    node_inequalities: NodeFunction = _empty_node_function,
+    edge_inequalities: EdgeFunction = _empty_edge_function,
+    params_in: TreeParameters | None = None,
+    topology: TreeOCPTopology | None = None,
+    locations: OCPCallbackLocations | None = None,
+) -> tuple[TreeVariables, jnp.int32, jnp.bool, TreeParameters]:
     """Implement the Primal-Dual LIPA algorithm for discrete-time optimal control.
 
     Args:
-      vars_in:       Variables object containing warm-start values for X, U, S, Y_dyn, Y_eq, Z, Theta.
+      vars_in:       TreeVariables object containing warm-start values for X, U, S, Y_dyn, Y_eq, Z, Theta.
       x0:            [n]           numpy array (initial state).
-      cost:          cost function with signature cost(x, u, theta, t).
       dynamics:      dynamics function with signature dynamics(x, u, theta, t).
-      equalities:    equalities(x, u, theta, t) = 0 should hold; output is (c_dim,).
-      inequalities:  inequalities(x, u, theta, t) <= 0 should hold; output is (g_dim,).
       settings:      the solver settings.
-      params_in:     Optional warm-start Parameters (µ, η_dyn, η_eq, η_ineq).
+      node_cost:     cost function with signature node_cost(x, theta, node).
+      edge_cost:     cost function with signature edge_cost(x, u, theta, edge).
+      node_equalities: constraints node_equalities(x, theta, node) = 0.
+      edge_equalities: constraints edge_equalities(x, u, theta, edge) = 0.
+      node_inequalities: constraints node_inequalities(x, theta, node) <= 0.
+      edge_inequalities: constraints edge_inequalities(x, u, theta, edge) <= 0.
+      params_in:     Optional warm-start TreeParameters (µ, η_dyn, η_eq, η_ineq).
                      If None, initialized from settings.µ0 / settings.η0.
                      Useful for debugging and iterating from a previously
                      saved iterate without re-paying the ramp-up phase.
+      topology:      Optional rooted-tree topology. If omitted, use the legacy
+                     chain layout. State callbacks and dynamics duals are node
+                     ordered; edge callbacks and controls are edge ordered.
 
     Returns:
-      Variables:   Variables object containing the solution for X, U, S, Y_dyn, Y_eq, Z, Theta.
+      TreeVariables:   TreeVariables object containing the solution for X, U, S, Y_dyn, Y_eq, Z, Theta.
       iterations:  the number of iterations it took to converge.
       no_errors:   whether no errors were encountered during the solve.
-      params:      Final Parameters (µ, η_dyn, η_eq, η_ineq) at termination.
+      params:      Final TreeParameters (µ, η_dyn, η_eq, η_ineq) at termination.
 
     """
-    vars_current = Variables(
+
+    if locations is None:
+        locations = _all_callback_locations(vars_in.X.shape[0], vars_in.U.shape[0])
+
+    def evaluate_equalities(X, U, Theta):  # noqa: ANN001, ANN202
+        return evaluate_node_edge(
+            node_equalities,
+            edge_equalities,
+            X,
+            U,
+            Theta,
+            topology,
+            locations.equalities,
+        )
+
+    def evaluate_inequalities(X, U, Theta):  # noqa: ANN001, ANN202
+        return evaluate_node_edge(
+            node_inequalities,
+            edge_inequalities,
+            X,
+            U,
+            Theta,
+            topology,
+            locations.inequalities,
+        )
+
+    def evaluate_cost(X, U, Theta):  # noqa: ANN001, ANN202
+        return node_edge_sum(
+            evaluate_node_edge(
+                node_cost, edge_cost, X, U, Theta, topology, locations.cost
+            )
+        )
+
+    validate_tree_shapes(
+        topology,
         X=vars_in.X,
         U=vars_in.U,
-        S=jnp.maximum(vars_in.S, jnp.sqrt(settings.µ0)),
+        S=vars_in.S,
         Y_dyn=vars_in.Y_dyn,
         Y_eq=vars_in.Y_eq,
-        Z=jnp.maximum(vars_in.Z, jnp.sqrt(settings.µ0)),
+        Z=vars_in.Z,
+        locations=locations,
+    )
+    vars_current = TreeVariables(
+        X=vars_in.X,
+        U=vars_in.U,
+        S=node_edge_map(
+            lambda value: jnp.maximum(value, jnp.sqrt(settings.µ0)), vars_in.S
+        ),
+        Y_dyn=vars_in.Y_dyn,
+        Y_eq=vars_in.Y_eq,
+        Z=node_edge_map(
+            lambda value: jnp.maximum(value, jnp.sqrt(settings.µ0)), vars_in.Z
+        ),
         Theta=vars_in.Theta,
     )
 
     # Infer residual shapes from inputs to initialize η
-    T = vars_current.X.shape[0] - 1
+    num_nodes = vars_current.X.shape[0]
     n = vars_current.X.shape[1]
-    c_dim = vars_current.Y_eq.shape[-1]
-    g_dim = vars_current.S.shape[-1]
 
     if params_in is not None:
-        params_current = Parameters(
+        expected_parameter_shapes = [
+            ("η_dyn", params_in.η_dyn.shape, vars_current.Y_dyn.shape)
+        ]
+        for name, actual, expected in (
+            ("η_eq", params_in.η_eq, vars_current.Y_eq),
+            ("η_ineq", params_in.η_ineq, vars_current.Z),
+        ):
+            expected_parameter_shapes.extend(
+                [
+                    (f"{name}.node", actual.node.shape, expected.node.shape),
+                    (f"{name}.edge", actual.edge.shape, expected.edge.shape),
+                ]
+            )
+        for name, actual, expected in expected_parameter_shapes:
+            if actual != expected:
+                message = f"params_in.{name} must have shape {expected}; got {actual}"
+                raise ValueError(message)
+        params_current = TreeParameters(
             µ=params_in.µ,
             η_dyn=params_in.η_dyn,
             η_eq=params_in.η_eq,
             η_ineq=params_in.η_ineq,
         )
     else:
-        η_dyn = jnp.full((T + 1, n), settings.η0)
-        η_eq = jnp.full((T + 1, c_dim), settings.η0)
-        η_ineq = jnp.full((T + 1, g_dim), settings.η0)
-        params_current = Parameters(
+        η_dyn = jnp.full((num_nodes, n), settings.η0)
+        η_eq = node_edge_map(
+            lambda value: jnp.full_like(value, settings.η0), vars_current.Y_eq
+        )
+        η_ineq = node_edge_map(
+            lambda value: jnp.full_like(value, settings.η0), vars_current.Z
+        )
+        params_current = TreeParameters(
             µ=settings.µ0, η_dyn=η_dyn, η_eq=η_eq, η_ineq=η_ineq
         )
 
@@ -108,10 +242,13 @@ def solve(
     )
 
     kkt_system = build_kkt(
-        cost=cost,
+        node_cost=node_cost,
+        edge_cost=edge_cost,
         dynamics=dynamics,
-        equalities=equalities,
-        inequalities=inequalities,
+        node_equalities=node_equalities,
+        edge_equalities=edge_equalities,
+        node_inequalities=node_inequalities,
+        edge_inequalities=edge_inequalities,
         x0=x0,
         vars=vars_current,
         params=params_current,
@@ -119,6 +256,8 @@ def solve(
         regularize_slack_elimination_with_mu=(
             settings.regularize_slack_elimination_with_mu
         ),
+        topology=topology,
+        locations=locations,
     )
 
     if settings.print_logs and not settings.print_ls_logs:
@@ -149,8 +288,8 @@ def solve(
 
     def main_loop_body(
         inputs: tuple[
-            Variables,
-            Parameters,
+            TreeVariables,
+            TreeParameters,
             KKTSystem,
             jnp.int32,
             jnp.double,
@@ -160,8 +299,8 @@ def solve(
             jnp.double,
         ],
     ) -> tuple[
-        Variables,
-        Parameters,
+        TreeVariables,
+        TreeParameters,
         KKTSystem,
         jnp.int32,
         jnp.double,
@@ -188,16 +327,18 @@ def solve(
 
         def solve_trial(
             trial_kkt_system: KKTSystem,
-        ) -> tuple[object, Variables, jax.Array]:
+        ) -> tuple[object, TreeVariables, jax.Array]:
             trial_factorization_outputs = factor_kkt(
                 inputs=trial_kkt_system.lhs,
                 use_parallel_lqr=settings.use_parallel_lqr,
+                topology=topology,
             )
             trial_deltas = solve_kkt(
                 factorization_outputs=trial_factorization_outputs,
                 factorization_inputs=trial_kkt_system.lhs,
                 rhs=trial_kkt_system.rhs,
                 use_parallel_lqr=settings.use_parallel_lqr,
+                topology=topology,
             )
             valid = jnp.logical_and(
                 factorization_is_valid(
@@ -208,15 +349,19 @@ def solve(
                 tree_all_finite(trial_deltas),
             )
             trial_dal = directional_augmented_lagrangian(
-                cost=cost,
+                node_cost=node_cost,
+                edge_cost=edge_cost,
                 dynamics=dynamics,
-                equalities=equalities,
-                inequalities=inequalities,
+                node_equalities=node_equalities,
+                edge_equalities=edge_equalities,
+                node_inequalities=node_inequalities,
+                edge_inequalities=edge_inequalities,
                 x0=x0,
                 params=params,
                 τ=τ,
-                T=T,
-                vars=vars,
+                topology=topology,
+                locations=locations,
+                variables=vars,
                 deltas=trial_deltas,
             )
             trial_merit_grad = jax.grad(trial_dal)(0.0)
@@ -248,7 +393,7 @@ def solve(
                 jnp.int32,
                 KKTSystem,
                 object,
-                Variables,
+                TreeVariables,
                 jnp.bool,
             ],
         ) -> jnp.bool:
@@ -265,10 +410,10 @@ def solve(
                 jnp.int32,
                 KKTSystem,
                 object,
-                Variables,
+                TreeVariables,
                 jnp.bool,
             ],
-        ) -> tuple[jnp.double, jnp.int32, KKTSystem, object, Variables, jnp.bool]:
+        ) -> tuple[jnp.double, jnp.int32, KKTSystem, object, TreeVariables, jnp.bool]:
             reg, attempt, _trial_kkt, _factorization, _deltas, _valid = state
             reg_new = next_hessian_regularization(reg)
             trial_kkt_system = add_scalar_hessian_regularization_delta(
@@ -308,7 +453,7 @@ def solve(
         )
 
         def iterative_refinement_loop_continuation_criteria(
-            x: tuple[Variables, jnp.int32],
+            x: tuple[TreeVariables, jnp.int32],
         ) -> jnp.bool:
             return jnp.logical_and(
                 regularization_valid,
@@ -316,13 +461,14 @@ def solve(
             )
 
         def iterative_refinement_loop_body(
-            x: tuple[Variables, jnp.int32],
-        ) -> tuple[Variables, jnp.int32]:
+            x: tuple[TreeVariables, jnp.int32],
+        ) -> tuple[TreeVariables, jnp.int32]:
             deltas_inner, it = x
             residuals = compute_kkt_residual(
                 factorization_inputs=kkt_system.lhs,
                 solve_inputs=kkt_system.rhs,
                 solution=deltas_inner,
+                topology=topology,
             )
 
             refinement_deltas = solve_kkt(
@@ -330,16 +476,29 @@ def solve(
                 factorization_inputs=kkt_system.lhs,
                 rhs=residuals,
                 use_parallel_lqr=settings.use_parallel_lqr,
+                topology=topology,
             )
 
             return (
-                Variables(
+                TreeVariables(
                     X=deltas_inner.X + refinement_deltas.X,
                     U=deltas_inner.U + refinement_deltas.U,
-                    S=deltas_inner.S + refinement_deltas.S,
+                    S=node_edge_map(
+                        lambda lhs, rhs: lhs + rhs,
+                        deltas_inner.S,
+                        refinement_deltas.S,
+                    ),
                     Y_dyn=deltas_inner.Y_dyn + refinement_deltas.Y_dyn,
-                    Y_eq=deltas_inner.Y_eq + refinement_deltas.Y_eq,
-                    Z=deltas_inner.Z + refinement_deltas.Z,
+                    Y_eq=node_edge_map(
+                        lambda lhs, rhs: lhs + rhs,
+                        deltas_inner.Y_eq,
+                        refinement_deltas.Y_eq,
+                    ),
+                    Z=node_edge_map(
+                        lambda lhs, rhs: lhs + rhs,
+                        deltas_inner.Z,
+                        refinement_deltas.Z,
+                    ),
                     Theta=deltas_inner.Theta + refinement_deltas.Theta,
                 ),
                 it + 1,
@@ -361,62 +520,74 @@ def solve(
             alphas = jnp.where(mask, -(τ * v) / safe_dv, 1.0)
             return jnp.min(jnp.concatenate([alphas.flatten(), jnp.array([1.0])]))
 
-        α_max_s = compute_alpha_max(vars.S, deltas.S, τ)
-
-        T_range = jnp.arange(T)
-        Tp1_range = jnp.arange(T + 1)
+        α_max_s = jnp.minimum(
+            compute_alpha_max(vars.S.node, deltas.S.node, τ),
+            compute_alpha_max(vars.S.edge, deltas.S.edge, τ),
+        )
 
         dal = directional_augmented_lagrangian(
-            cost=cost,
+            node_cost=node_cost,
+            edge_cost=edge_cost,
             dynamics=dynamics,
-            equalities=equalities,
-            inequalities=inequalities,
+            node_equalities=node_equalities,
+            edge_equalities=edge_equalities,
+            node_inequalities=node_inequalities,
+            edge_inequalities=edge_inequalities,
             x0=x0,
             params=params,
             τ=τ,
-            T=T,
-            vars=vars,
+            topology=topology,
+            locations=locations,
+            variables=vars,
             deltas=deltas,
         )
 
         dal_x = directional_augmented_lagrangian(
-            cost=cost,
+            node_cost=node_cost,
+            edge_cost=edge_cost,
             dynamics=dynamics,
-            equalities=equalities,
-            inequalities=inequalities,
+            node_equalities=node_equalities,
+            edge_equalities=edge_equalities,
+            node_inequalities=node_inequalities,
+            edge_inequalities=edge_inequalities,
             x0=x0,
             params=params,
             τ=τ,
-            T=T,
-            vars=vars,
-            deltas=Variables(
+            topology=topology,
+            locations=locations,
+            variables=vars,
+            deltas=TreeVariables(
                 X=deltas.X,
                 U=deltas.U,
-                S=jnp.zeros_like(deltas.S),
+                S=node_edge_map(jnp.zeros_like, deltas.S),
                 Y_dyn=jnp.zeros_like(deltas.Y_dyn),
-                Y_eq=jnp.zeros_like(deltas.Y_eq),
-                Z=jnp.zeros_like(deltas.Z),
+                Y_eq=node_edge_map(jnp.zeros_like, deltas.Y_eq),
+                Z=node_edge_map(jnp.zeros_like, deltas.Z),
                 Theta=jnp.zeros_like(deltas.Theta),
             ),
         )
 
         dal_s = directional_augmented_lagrangian(
-            cost=cost,
+            node_cost=node_cost,
+            edge_cost=edge_cost,
             dynamics=dynamics,
-            equalities=equalities,
-            inequalities=inequalities,
+            node_equalities=node_equalities,
+            edge_equalities=edge_equalities,
+            node_inequalities=node_inequalities,
+            edge_inequalities=edge_inequalities,
             x0=x0,
             params=params,
             τ=τ,
-            T=T,
-            vars=vars,
-            deltas=Variables(
+            topology=topology,
+            locations=locations,
+            variables=vars,
+            deltas=TreeVariables(
                 X=jnp.zeros_like(deltas.X),
                 U=jnp.zeros_like(deltas.U),
                 S=deltas.S,
                 Y_dyn=jnp.zeros_like(deltas.Y_dyn),
-                Y_eq=jnp.zeros_like(deltas.Y_eq),
-                Z=jnp.zeros_like(deltas.Z),
+                Y_eq=node_edge_map(jnp.zeros_like, deltas.Y_eq),
+                Z=node_edge_map(jnp.zeros_like, deltas.Z),
                 Theta=jnp.zeros_like(deltas.Theta),
             ),
         )
@@ -451,22 +622,32 @@ def solve(
             """
             cX = vars.X + α * deltas.X
             cU = vars.U + α * deltas.U
-            cU_pad = pad(cU)
-            cS = jnp.maximum(vars.S + α * deltas.S, (1.0 - τ) * vars.S)
-            cTheta = vars.Theta + α * deltas.Theta
-
-            c_dyn0 = x0 - cX[0]
-            c_dyn = vectorize(dynamics)(cX[:-1], cU, cTheta, T_range) - cX[1:]
-            c_eq = vectorize(equalities)(cX, cU_pad, cTheta, Tp1_range)
-            g = vectorize(inequalities)(cX, cU_pad, cTheta, Tp1_range)
-            gps = (g + cS).flatten()
-            c_all = jnp.concatenate(
-                [c_dyn0.flatten(), c_dyn.flatten(), c_eq.flatten(), gps]
+            cS = node_edge_map(
+                lambda value, delta: jnp.maximum(value + α * delta, (1.0 - τ) * value),
+                vars.S,
+                deltas.S,
             )
+            cTheta = vars.Theta + α * deltas.Theta
+            candidate_vars = TreeVariables(
+                X=cX,
+                U=cU,
+                S=cS,
+                Y_dyn=vars.Y_dyn,
+                Y_eq=vars.Y_eq,
+                Z=vars.Z,
+                Theta=cTheta,
+            )
+            c_dyn = dynamics_residuals(dynamics, x0, candidate_vars, topology)
+            c_eq = evaluate_equalities(cX, cU, cTheta)
+            g = evaluate_inequalities(cX, cU, cTheta)
+            gps = node_edge_flatten(
+                node_edge_map(lambda value, slack: value + slack, g, cS)
+            )
+            c_all = jnp.concatenate([c_dyn.flatten(), node_edge_flatten(c_eq), gps])
             theta = jnp.sum(jnp.square(c_all))
 
-            f_cost = vectorize(cost)(cX, cU_pad, cTheta, Tp1_range).sum()
-            f_barrier = -params.µ * jnp.sum(jnp.log(cS))
+            f_cost = evaluate_cost(cX, cU, cTheta)
+            f_barrier = -params.µ * node_edge_sum(node_edge_map(jnp.log, cS))
             f_val = f_cost + f_barrier
             return theta, f_val
 
@@ -494,23 +675,37 @@ def solve(
             if settings.print_ls_logs:
                 cX = vars.X + α * deltas.X
                 cU = vars.U + α * deltas.U
-                cU_pad = pad(cU)
-                cS = jnp.maximum(vars.S + α * deltas.S, (1.0 - τ) * vars.S)
+                cS = node_edge_map(
+                    lambda value, delta: jnp.maximum(
+                        value + α * delta, (1.0 - τ) * value
+                    ),
+                    vars.S,
+                    deltas.S,
+                )
                 cTheta = vars.Theta + α * deltas.Theta
+                candidate_vars = TreeVariables(
+                    X=cX,
+                    U=cU,
+                    S=cS,
+                    Y_dyn=vars.Y_dyn,
+                    Y_eq=vars.Y_eq,
+                    Z=vars.Z,
+                    Theta=cTheta,
+                )
+                c_dyn = dynamics_residuals(dynamics, x0, candidate_vars, topology)
+                c_eq = evaluate_equalities(cX, cU, cTheta)
+                c = jnp.concatenate([c_dyn.flatten(), node_edge_flatten(c_eq)])
 
-                c_dyn0 = x0 - cX[0]
-                c_dyn = vectorize(dynamics)(cX[:-1], cU, cTheta, T_range) - cX[1:]
-                c_eq = vectorize(equalities)(cX, cU_pad, cTheta, Tp1_range)
-                c = jnp.concatenate([c_dyn0, c_dyn.flatten(), c_eq.flatten()])
-
-                g = vectorize(inequalities)(cX, cU_pad, cTheta, Tp1_range)
-                gps = (g + cS).flatten()
+                g = evaluate_inequalities(cX, cU, cTheta)
+                gps = node_edge_flatten(
+                    node_edge_map(lambda value, slack: value + slack, g, cS)
+                )
                 dmerit = candidate_merit - baseline_merit
                 jax.debug.print(
                     "{:^10} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g}",  # noqa: E501
                     "",
                     α,
-                    vectorize(cost)(cX, cU_pad, cTheta, Tp1_range).sum(),
+                    evaluate_cost(cX, cU, cTheta),
                     jnp.linalg.norm(c),
                     jnp.linalg.norm(gps),
                     dmerit,
@@ -566,40 +761,35 @@ def solve(
                 factorization_inputs=kkt_system.lhs,
                 solve_inputs=kkt_system.rhs,
                 solution=deltas,
+                topology=topology,
             )
             residual_vec = jnp.concatenate(
                 [
                     residuals.X.flatten(),
                     residuals.U.flatten(),
-                    residuals.S.flatten(),
+                    node_edge_flatten(residuals.S),
                     residuals.Y_dyn.flatten(),
-                    residuals.Y_eq.flatten(),
-                    residuals.Z.flatten(),
+                    node_edge_flatten(residuals.Y_eq),
+                    node_edge_flatten(residuals.Z),
                     residuals.Theta.flatten(),
                 ]
             )
 
-            U_pad = pad(vars.U)
-            T_range = jnp.arange(T)
-            Tp1_range = jnp.arange(T + 1)
+            c_dyn = dynamics_residuals(dynamics, x0, vars, topology)
+            c_eq = evaluate_equalities(vars.X, vars.U, vars.Theta)
+            c = jnp.concatenate([c_dyn.flatten(), node_edge_flatten(c_eq)])
 
-            c_dyn0 = x0 - vars.X[0]
-            c_dyn = (
-                vectorize(dynamics)(vars.X[:-1], vars.U, vars.Theta, T_range)
-                - vars.X[1:]
+            g = evaluate_inequalities(vars.X, vars.U, vars.Theta)
+            gps = node_edge_flatten(
+                node_edge_map(lambda value, slack: value + slack, g, vars.S)
             )
-            c_eq = vectorize(equalities)(vars.X, U_pad, vars.Theta, Tp1_range)
-            c = jnp.concatenate([c_dyn0, c_dyn.flatten(), c_eq.flatten()])
-
-            g = vectorize(inequalities)(vars.X, U_pad, vars.Theta, Tp1_range)
-            gps = (g + vars.S).flatten()
 
             avg_η = jnp.mean(
                 jnp.concatenate(
                     [
                         params.η_dyn.flatten(),
-                        params.η_eq.flatten(),
-                        params.η_ineq.flatten(),
+                        node_edge_flatten(params.η_eq),
+                        node_edge_flatten(params.η_ineq),
                     ]
                 )
             )
@@ -634,17 +824,18 @@ def solve(
                 "{:^+10} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10} {:^+10.4g}",  # noqa: E501
                 iteration,
                 α,
-                vectorize(cost)(vars.X, U_pad, vars.Theta, Tp1_range).sum(),
+                evaluate_cost(vars.X, vars.U, vars.Theta),
                 jnp.linalg.norm(c),
                 jnp.linalg.norm(gps),
                 baseline_merit,
                 merit_grad,
                 merit_grad_x,
                 merit_grad_s,
-                jnp.linalg.norm(deltas.X) + jnp.linalg.norm(pad(deltas.U)),
-                jnp.linalg.norm(deltas.S),
-                jnp.linalg.norm(deltas.Y_dyn) + jnp.linalg.norm(deltas.Y_eq),
-                jnp.linalg.norm(deltas.Z),
+                jnp.linalg.norm(deltas.X) + jnp.linalg.norm(deltas.U),
+                jnp.linalg.norm(node_edge_flatten(deltas.S)),
+                jnp.linalg.norm(deltas.Y_dyn)
+                + jnp.linalg.norm(node_edge_flatten(deltas.Y_eq)),
+                jnp.linalg.norm(node_edge_flatten(deltas.Z)),
                 jnp.linalg.norm(deltas.Theta),
                 avg_η,
                 params.µ,
@@ -654,13 +845,23 @@ def solve(
                 ordered=True,
             )
 
-        updated_vars = Variables(
+        updated_vars = TreeVariables(
             X=vars.X + α * deltas.X,
             U=vars.U + α * deltas.U,
-            S=jnp.maximum(vars.S + α * deltas.S, (1.0 - τ) * vars.S),
+            S=node_edge_map(
+                lambda value, delta: jnp.maximum(value + α * delta, (1.0 - τ) * value),
+                vars.S,
+                deltas.S,
+            ),
             Y_dyn=vars.Y_dyn + α * deltas.Y_dyn,
-            Y_eq=vars.Y_eq + α * deltas.Y_eq,
-            Z=jnp.maximum(vars.Z + α * deltas.Z, (1.0 - τ) * vars.Z),
+            Y_eq=node_edge_map(
+                lambda value, delta: value + α * delta, vars.Y_eq, deltas.Y_eq
+            ),
+            Z=node_edge_map(
+                lambda value, delta: jnp.maximum(value + α * delta, (1.0 - τ) * value),
+                vars.Z,
+                deltas.Z,
+            ),
             Theta=vars.Theta + α * deltas.Theta,
         )
 
@@ -672,13 +873,13 @@ def solve(
         nan_in_update = jnp.logical_or(
             jnp.logical_not(regularization_valid),
             jnp.logical_not(
-            jnp.all(jnp.isfinite(updated_vars.X))
-            & jnp.all(jnp.isfinite(updated_vars.U))
-            & jnp.all(jnp.isfinite(updated_vars.S))
-            & jnp.all(jnp.isfinite(updated_vars.Y_dyn))
-            & jnp.all(jnp.isfinite(updated_vars.Y_eq))
-            & jnp.all(jnp.isfinite(updated_vars.Z))
-            & jnp.all(jnp.isfinite(updated_vars.Theta))
+                jnp.all(jnp.isfinite(updated_vars.X))
+                & jnp.all(jnp.isfinite(updated_vars.U))
+                & jnp.all(jnp.isfinite(updated_vars.Y_dyn))
+                & jnp.all(jnp.isfinite(updated_vars.Theta))
+                & tree_all_finite(updated_vars.S)
+                & tree_all_finite(updated_vars.Y_eq)
+                & tree_all_finite(updated_vars.Z)
             ),
         )
         updated_vars = jax.tree_util.tree_map(
@@ -688,13 +889,18 @@ def solve(
         )
 
         new_residual = build_kkt_rhs(
-            cost=cost,
+            node_cost=node_cost,
+            edge_cost=edge_cost,
             dynamics=dynamics,
-            equalities=equalities,
-            inequalities=inequalities,
+            node_equalities=node_equalities,
+            edge_equalities=edge_equalities,
+            node_inequalities=node_inequalities,
+            edge_inequalities=edge_inequalities,
             x0=x0,
             vars=updated_vars,
             params=params,
+            topology=topology,
+            locations=locations,
         )
 
         improved_dyn = jnp.abs(
@@ -706,22 +912,26 @@ def solve(
             jnp.minimum(params.η_dyn * settings.η_update_factor, settings.η_max),
         )
 
-        improved_eq = jnp.abs(
-            new_residual.Y_eq
-        ) < settings.η_improvement_threshold * jnp.abs(kkt_system.rhs.Y_eq)
-        η_eq_new = jnp.where(
-            improved_eq,
+        η_eq_new = node_edge_map(
+            lambda new, old, eta: jnp.where(
+                jnp.abs(new) < settings.η_improvement_threshold * jnp.abs(old),
+                eta,
+                jnp.minimum(eta * settings.η_update_factor, settings.η_max),
+            ),
+            new_residual.Y_eq,
+            kkt_system.rhs.Y_eq,
             params.η_eq,
-            jnp.minimum(params.η_eq * settings.η_update_factor, settings.η_max),
         )
 
-        improved_ineq = jnp.abs(
-            new_residual.Z
-        ) < settings.η_improvement_threshold * jnp.abs(kkt_system.rhs.Z)
-        η_ineq_new = jnp.where(
-            improved_ineq,
+        η_ineq_new = node_edge_map(
+            lambda new, old, eta: jnp.where(
+                jnp.abs(new) < settings.η_improvement_threshold * jnp.abs(old),
+                eta,
+                jnp.minimum(eta * settings.η_update_factor, settings.η_max),
+            ),
+            new_residual.Z,
+            kkt_system.rhs.Z,
             params.η_ineq,
-            jnp.minimum(params.η_ineq * settings.η_update_factor, settings.η_max),
         )
 
         residual = jnp.concatenate(
@@ -731,10 +941,12 @@ def solve(
                 # Note: absolutely do NOT just use new_residual.S.flatten() here.
                 # Using (vars.S * new_residual.S).flatten() is also suboptimal,
                 # but would be a lot closer to being OK.
-                (vars.S * vars.Z).flatten(),
+                node_edge_flatten(
+                    node_edge_map(lambda slack, z: slack * z, vars.S, vars.Z)
+                ),
                 new_residual.Y_dyn.flatten(),
-                new_residual.Y_eq.flatten(),
-                new_residual.Z.flatten(),
+                node_edge_flatten(new_residual.Y_eq),
+                node_edge_flatten(new_residual.Z),
                 new_residual.Theta.flatten(),
             ]
         )
@@ -749,7 +961,7 @@ def solve(
 
         # Guard: with no inequalities the centering rule has nothing to
         # track (S/Z are empty), so fall back to the default rule.
-        g_dim_local = vars.S.shape[-1]
+        num_inequalities = vars.S.node.size + vars.S.edge.size
 
         def _mehrotra_µ() -> jnp.double:
             """Centering µ update: ``µ_target = σ · mean(S·Z)``.
@@ -763,7 +975,11 @@ def solve(
             favour of an always-on σ to avoid the extra factorisation.
             """
             sigma = settings.mehrotra_sigma
-            sz_mean = jnp.mean(vars.S * vars.Z)
+            sz_mean = jnp.mean(
+                node_edge_flatten(
+                    node_edge_map(lambda slack, z: slack * z, vars.S, vars.Z)
+                )
+            )
             µ_target = sigma * sz_mean
             # Upper clamp: don't shrink µ by more than µ_update_factor
             # in a single step. Lower clamp: µ_min.
@@ -771,12 +987,12 @@ def solve(
             upper = params.µ  # non-increasing
             return jnp.clip(µ_target, lower, upper)
 
-        if settings.mehrotra_mu and g_dim_local > 0:
+        if settings.mehrotra_mu and num_inequalities > 0:
             µ_new = _mehrotra_µ()
         else:
             µ_new = µ_new_default
 
-        updated_params = Parameters(
+        updated_params = TreeParameters(
             µ=µ_new,
             η_dyn=η_dyn_new,
             η_eq=η_eq_new,
@@ -798,10 +1014,13 @@ def solve(
         )
 
         kkt_system_new = build_kkt(
-            cost=cost,
+            node_cost=node_cost,
+            edge_cost=edge_cost,
             dynamics=dynamics,
-            equalities=equalities,
-            inequalities=inequalities,
+            node_equalities=node_equalities,
+            edge_equalities=edge_equalities,
+            node_inequalities=node_inequalities,
+            edge_inequalities=edge_inequalities,
             x0=x0,
             vars=updated_vars,
             params=updated_params,
@@ -809,6 +1028,8 @@ def solve(
             regularize_slack_elimination_with_mu=(
                 settings.regularize_slack_elimination_with_mu
             ),
+            topology=topology,
+            locations=locations,
         )
 
         # On NaN we already reverted vars; jump iteration past max_iterations
@@ -818,9 +1039,9 @@ def solve(
         # Track cost of new iterate (and its improvement vs previous iterate)
         # for the auxiliary cost-improvement / primal-violation termination.
         # On NaN we kept old vars, so report no improvement.
-        new_iter_cost = vectorize(cost)(
-            updated_vars.X, pad(updated_vars.U), updated_vars.Theta, Tp1_range
-        ).sum()
+        new_iter_cost = evaluate_cost(
+            updated_vars.X, updated_vars.U, updated_vars.Theta
+        )
         new_iter_cost = jnp.where(nan_in_update, prev_iter_cost, new_iter_cost)
         last_improvement = prev_iter_cost - new_iter_cost
 
@@ -851,8 +1072,8 @@ def solve(
 
     def main_loop_continuation_criteria(
         inputs: tuple[
-            Variables,
-            Parameters,
+            TreeVariables,
+            TreeParameters,
             KKTSystem,
             jnp.int32,
             jnp.double,
@@ -881,10 +1102,12 @@ def solve(
                 # Note: absolutely do NOT just use kkt_system.rhs.S.flatten() here.
                 # Using (vars.S * kkt_system.rhs.S).flatten() is also suboptimal,
                 # but would be a lot closer to being OK.
-                (vars.S * vars.Z).flatten(),
+                node_edge_flatten(
+                    node_edge_map(lambda slack, z: slack * z, vars.S, vars.Z)
+                ),
                 kkt_system.rhs.Y_dyn.flatten(),
-                kkt_system.rhs.Y_eq.flatten(),
-                kkt_system.rhs.Z.flatten(),
+                node_edge_flatten(kkt_system.rhs.Y_eq),
+                node_edge_flatten(kkt_system.rhs.Z),
                 kkt_system.rhs.Theta.flatten(),
             ]
         )
@@ -896,12 +1119,22 @@ def solve(
         # (recovered without re-evaluating the inequality function) so
         # the aux gate matches the benchmark's success-check exactly.
         ineq_violation = jnp.max(
-            jnp.maximum(kkt_system.rhs.Z - vars.S, 0.0), initial=0.0
+            jnp.maximum(
+                node_edge_flatten(
+                    node_edge_map(
+                        lambda residual, slack: residual - slack,
+                        kkt_system.rhs.Z,
+                        vars.S,
+                    )
+                ),
+                0.0,
+            ),
+            initial=0.0,
         )
         primal_violation = jnp.maximum(
             jnp.max(jnp.abs(kkt_system.rhs.Y_dyn), initial=0.0),
             jnp.maximum(
-                jnp.max(jnp.abs(kkt_system.rhs.Y_eq), initial=0.0),
+                jnp.max(jnp.abs(node_edge_flatten(kkt_system.rhs.Y_eq)), initial=0.0),
                 ineq_violation,
             ),
         )
@@ -916,9 +1149,7 @@ def solve(
             jnp.logical_not(any_converged), jnp.logical_not(hit_iteration_limit)
         )
 
-    init_iter_cost = vectorize(cost)(
-        vars_current.X, pad(vars_current.U), vars_current.Theta, jnp.arange(T + 1)
-    ).sum()
+    init_iter_cost = evaluate_cost(vars_current.X, vars_current.U, vars_current.Theta)
     (
         vars_out,
         final_params,
@@ -950,3 +1181,178 @@ def solve(
     no_errors = iteration < settings.max_iterations
 
     return vars_out, iteration, no_errors, final_params
+
+
+def solve_tree(
+    vars_in: TreeVariables,
+    x0: jax.Array,
+    dynamics: EdgeFunction,
+    settings: SolverSettings,
+    *,
+    node_cost: NodeCostFunction = _zero_node_cost,
+    edge_cost: EdgeCostFunction = _zero_edge_cost,
+    node_equalities: NodeFunction = _empty_node_function,
+    edge_equalities: EdgeFunction = _empty_edge_function,
+    node_inequalities: NodeFunction = _empty_node_function,
+    edge_inequalities: EdgeFunction = _empty_edge_function,
+    params_in: TreeParameters | None = None,
+    topology: TreeOCPTopology | None = None,
+    locations: OCPCallbackLocations | None = None,
+) -> tuple[TreeVariables, jnp.int32, jnp.bool, TreeParameters]:
+    """Solve an OCP with explicit node and edge callbacks and storage.
+
+    ``locations`` independently selects where cost, equality, and inequality
+    callbacks are active. Constraint rows in ``vars_in`` and ``params_in``
+    follow the corresponding selected-index order. If omitted, every callback
+    is evaluated at every node and edge.
+    """
+    if locations is None:
+        locations = _all_callback_locations(vars_in.X.shape[0], vars_in.U.shape[0])
+    locations = validate_callback_locations(
+        locations,
+        num_nodes=vars_in.X.shape[0],
+        num_edges=vars_in.U.shape[0],
+    )
+    return _solve_node_edge(
+        vars_in=vars_in,
+        x0=x0,
+        dynamics=dynamics,
+        settings=settings,
+        node_cost=node_cost,
+        edge_cost=edge_cost,
+        node_equalities=node_equalities,
+        edge_equalities=edge_equalities,
+        node_inequalities=node_inequalities,
+        edge_inequalities=edge_inequalities,
+        params_in=params_in,
+        topology=topology,
+        locations=locations,
+    )
+
+
+def _validate_chain_shapes(vars_in: Variables) -> None:
+    """Validate the legacy ``T + 1`` chain layout using static shapes."""
+    num_stages = vars_in.X.shape[0]
+    num_edges = num_stages - 1
+    if vars_in.U.shape[0] != num_edges:
+        message = f"U must have {num_edges} rows; got {vars_in.U.shape[0]}"
+        raise ValueError(message)
+    if vars_in.Y_dyn.shape != vars_in.X.shape:
+        message = (
+            f"Y_dyn must have the same shape as X ({vars_in.X.shape}); "
+            f"got {vars_in.Y_dyn.shape}"
+        )
+        raise ValueError(message)
+    for name, value in (
+        ("S", vars_in.S),
+        ("Y_eq", vars_in.Y_eq),
+        ("Z", vars_in.Z),
+    ):
+        if value.shape[0] != num_stages:
+            message = f"{name} must have {num_stages} rows; got {value.shape[0]}"
+            raise ValueError(message)
+    if vars_in.S.shape != vars_in.Z.shape:
+        message = f"S and Z must have identical shapes; got {vars_in.S.shape} and {vars_in.Z.shape}"
+        raise ValueError(message)
+
+
+@partial(
+    jax.jit,
+    static_argnames=("cost", "dynamics", "equalities", "inequalities"),
+)
+def solve(
+    vars_in: Variables,
+    x0: jax.Array,
+    cost: CostFunction,
+    dynamics: Function,
+    settings: SolverSettings,
+    equalities: Function = _empty_edge_function,
+    inequalities: Function = _empty_edge_function,
+    params_in: Parameters | None = None,
+) -> tuple[Variables, jnp.int32, jnp.bool, Parameters]:
+    """Solve a chain OCP using one callback and value row per local stage.
+
+    The callbacks use the conventional ``(x, u, theta, t)`` signature for
+    ``t = 0, ..., T``.  At ``t = T`` the control argument is a zero vector.
+    Internally, stages ``0, ..., T - 1`` are edge blocks and stage ``T`` is
+    the sole selected node block of :func:`solve_tree`.
+    """
+    _validate_chain_shapes(vars_in)
+    num_edges = vars_in.U.shape[0]
+    edge_indices = jnp.arange(num_edges, dtype=jnp.int32)
+    terminal_indices = jnp.asarray([num_edges], dtype=jnp.int32)
+    chain_locations = NodeAndEdgeIndices(
+        node=terminal_indices,
+        edge=edge_indices,
+    )
+    locations = OCPCallbackLocations(
+        cost=chain_locations,
+        equalities=chain_locations,
+        inequalities=chain_locations,
+    )
+    zero_control = jnp.zeros((vars_in.U.shape[1],), dtype=vars_in.U.dtype)
+
+    def terminal_cost(x, theta, node):  # noqa: ANN001, ANN202
+        return cost(x, zero_control, theta, node)
+
+    def terminal_equalities(x, theta, node):  # noqa: ANN001, ANN202
+        return equalities(x, zero_control, theta, node)
+
+    def terminal_inequalities(x, theta, node):  # noqa: ANN001, ANN202
+        return inequalities(x, zero_control, theta, node)
+
+    tree_vars = TreeVariables(
+        X=vars_in.X,
+        U=vars_in.U,
+        S=NodeAndEdgeValues(node=vars_in.S[-1:], edge=vars_in.S[:-1]),
+        Y_dyn=vars_in.Y_dyn,
+        Y_eq=NodeAndEdgeValues(node=vars_in.Y_eq[-1:], edge=vars_in.Y_eq[:-1]),
+        Z=NodeAndEdgeValues(node=vars_in.Z[-1:], edge=vars_in.Z[:-1]),
+        Theta=vars_in.Theta,
+    )
+    tree_params = None
+    if params_in is not None:
+        tree_params = TreeParameters(
+            µ=params_in.µ,
+            η_dyn=params_in.η_dyn,
+            η_eq=NodeAndEdgeValues(node=params_in.η_eq[-1:], edge=params_in.η_eq[:-1]),
+            η_ineq=NodeAndEdgeValues(
+                node=params_in.η_ineq[-1:], edge=params_in.η_ineq[:-1]
+            ),
+        )
+
+    tree_out, iterations, no_errors, tree_params_out = _solve_node_edge(
+        vars_in=tree_vars,
+        x0=x0,
+        dynamics=dynamics,
+        settings=settings,
+        node_cost=terminal_cost,
+        edge_cost=cost,
+        node_equalities=terminal_equalities,
+        edge_equalities=equalities,
+        node_inequalities=terminal_inequalities,
+        edge_inequalities=inequalities,
+        params_in=tree_params,
+        topology=None,
+        locations=locations,
+    )
+
+    def flatten_stages(values: NodeAndEdgeValues) -> jax.Array:
+        return jnp.concatenate([values.edge, values.node], axis=0)
+
+    vars_out = Variables(
+        X=tree_out.X,
+        U=tree_out.U,
+        S=flatten_stages(tree_out.S),
+        Y_dyn=tree_out.Y_dyn,
+        Y_eq=flatten_stages(tree_out.Y_eq),
+        Z=flatten_stages(tree_out.Z),
+        Theta=tree_out.Theta,
+    )
+    params_out = Parameters(
+        µ=tree_params_out.µ,
+        η_dyn=tree_params_out.η_dyn,
+        η_eq=flatten_stages(tree_params_out.η_eq),
+        η_ineq=flatten_stages(tree_params_out.η_ineq),
+    )
+    return vars_out, iterations, no_errors, params_out

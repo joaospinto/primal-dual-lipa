@@ -1,19 +1,17 @@
 # From https://github.com/google/trajax/blob/main/notebooks/l4dc/QuadPend.ipynb
 
 import unittest
-from collections.abc import Callable
 from functools import partial
 
 import jax
 import matplotlib.pyplot as plt
 from jax import numpy as jnp
-from matplotlib import animation
 
 from primal_dual_lipa.integrators import euler
 from primal_dual_lipa.lagrangian_helpers import pad
 from primal_dual_lipa.optimizers import SolverSettings, solve
 from primal_dual_lipa.types import Variables
-from primal_dual_lipa.vectorization_helpers import vectorize
+from primal_dual_lipa.vectorization_helpers import vectorize_edge
 from tests.helpers import gen_movie, gen_timelapse, get_s1_wrapper
 
 jax.config.update("jax_enable_x64", True)  # noqa: FBT003
@@ -443,7 +441,7 @@ class TestQuadpendulum(unittest.TestCase):
         print(f"Final Theta: {vars_out.Theta}")  # noqa: T201
         self.assertTrue(no_errors)  # noqa: PT009
         self.assertLess(
-            vectorize(cost_closure)(
+            vectorize_edge(cost_closure)(
                 vars_out.X, pad(vars_out.U), vars_out.Theta, jnp.arange(T + 1)
             ).sum(),
             10.0,

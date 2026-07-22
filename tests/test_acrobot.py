@@ -12,7 +12,7 @@ from primal_dual_lipa.integrators import euler
 from primal_dual_lipa.lagrangian_helpers import pad
 from primal_dual_lipa.optimizers import SolverSettings, solve
 from primal_dual_lipa.types import Variables
-from primal_dual_lipa.vectorization_helpers import vectorize
+from primal_dual_lipa.vectorization_helpers import vectorize_edge
 
 jax.config.update("jax_enable_x64", True)  # noqa: FBT003
 
@@ -133,7 +133,7 @@ class TestAcrobot(unittest.TestCase):
         )
         self.assertTrue(no_errors)  # noqa: PT009
         self.assertLess(
-            vectorize(cost)(
+            vectorize_edge(cost)(
                 vars_out.X, pad(vars_out.U), vars_out.Theta, jnp.arange(T + 1)
             ).sum(),
             45.0,
