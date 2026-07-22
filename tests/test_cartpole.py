@@ -2,6 +2,7 @@
 
 """Test goal-reaching with cartpole."""
 
+import os
 import unittest
 from functools import partial
 
@@ -211,6 +212,9 @@ class TestCartpole(unittest.TestCase):
             ).sum(),
             67.0,
         )  # noqa: PT009
+
+        if os.environ.get("LIPA_SKIP_VISUALIZATIONS") == "1":
+            return
 
         # Visualization
         print("Generating visualization assets...")  # noqa: T201

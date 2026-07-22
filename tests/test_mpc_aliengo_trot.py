@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 _RUN = os.environ.get("RUN_MPC_TESTS")
-from tests.mpc_examples import fetch_assets, run_offline
+from tests.mpc_examples import fetch_assets
 
 
 @unittest.skipUnless(_RUN, "set RUN_MPC_TESTS=1 to run mpc-example smoke tests")

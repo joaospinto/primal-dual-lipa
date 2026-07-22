@@ -15,7 +15,7 @@ import os
 import unittest
 from pathlib import Path
 
-from tests.mpc_examples import fetch_assets, run_offline
+from tests.mpc_examples import fetch_assets
 
 _RUN = os.environ.get("RUN_MPC_TESTS")
 

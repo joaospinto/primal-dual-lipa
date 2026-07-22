@@ -1,5 +1,6 @@
 # From https://github.com/google/trajax/blob/main/notebooks/l4dc/QuadPend.ipynb
 
+import os
 import unittest
 from functools import partial
 
@@ -446,6 +447,9 @@ class TestQuadpendulum(unittest.TestCase):
             ).sum(),
             10.0,
         )  # noqa: PT009
+
+        if os.environ.get("LIPA_SKIP_VISUALIZATIONS") == "1":
+            return
 
         # Visualization
         print("Generating visualization assets...")  # noqa: T201
