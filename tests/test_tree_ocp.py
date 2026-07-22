@@ -6,7 +6,7 @@ import unittest
 
 import jax
 from jax import numpy as jnp
-from jax_bidirectional_tree_rake_compress import plan_statistics
+from jax_bidirectional_tree_rake_compress import ContractionExecutor, plan_statistics
 
 from primal_dual_lipa.optimizers import solve, solve_tree
 from primal_dual_lipa.topology import make_tree_ocp_topology
@@ -53,6 +53,8 @@ class TestTreeOCPSolve(unittest.TestCase):
 
         self.assertTrue(parallel.use_parallel_lqr)  # noqa: PT009
         self.assertFalse(sequential.use_parallel_lqr)  # noqa: PT009
+        self.assertIs(parallel.plan.executor, ContractionExecutor.UNROLLED)  # noqa: PT009
+        self.assertIs(sequential.plan.executor, ContractionExecutor.UNROLLED)  # noqa: PT009
         self.assertGreater(plan_statistics(parallel.plan).num_compressions, 0)  # noqa: PT009
         self.assertEqual(plan_statistics(sequential.plan).num_compressions, 0)  # noqa: PT009
 
@@ -64,6 +66,17 @@ class TestTreeOCPSolve(unittest.TestCase):
                 settings=SolverSettings(max_iterations=0, use_parallel_lqr=True),
                 topology=sequential,
             )
+
+    def test_chain_topology_selects_scan_executor(self) -> None:
+        """Chains avoid unrolled contraction loops in either solver mode."""
+        parents = [-1, 0, 1, 2]
+        parallel = make_tree_ocp_topology(parents, use_parallel_lqr=True)
+        sequential = make_tree_ocp_topology(parents, use_parallel_lqr=False)
+
+        self.assertIs(  # noqa: PT009
+            parallel.plan.executor, ContractionExecutor.ASSOCIATIVE_SCAN
+        )
+        self.assertIs(sequential.plan.executor, ContractionExecutor.SCAN)  # noqa: PT009
 
     def test_sequential_and_parallel_tree_schedules_match(self) -> None:
         """Both schedules solve the same depth-two branching quadratic OCP."""

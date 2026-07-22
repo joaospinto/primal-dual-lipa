@@ -626,15 +626,15 @@ cuda12 = [
 
 [[package]]
 name = "jax-bidirectional-tree-rake-compress"
-version = "0.2.0"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jax" },
     { name = "numpy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f9/3a/452fb4bf26551de7ee7027419953922080d7e85823362fd0f8085e7d22ec/jax_bidirectional_tree_rake_compress-0.2.0.tar.gz", hash = "sha256:841bc6370bbc7e693b54b8df5e53b648c3f2a782d01d3f0d66c6c3f4d55e2d2b", size = 23564, upload-time = "2026-07-22T18:37:13.808Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d3/e1/69b473ba87e071ef97e2208960120a126379f2d144edeef8feddd37d62ed/jax_bidirectional_tree_rake_compress-0.3.0.tar.gz", hash = "sha256:46db0c05b171070c2d3d5e5948912de3236eb5183be27200e1b719d2b90e427c", size = 31446, upload-time = "2026-07-22T22:58:02.708Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b2/de/9075c6986aed5e1fe5735e1b4711ba535bceb3d62064f8b0574c4634df89/jax_bidirectional_tree_rake_compress-0.2.0-py3-none-any.whl", hash = "sha256:893c6f309b98c199ae48e70d5968f71441657b94fcbc8cc2f3a46c66aa316780", size = 12414, upload-time = "2026-07-22T18:37:12.681Z" },
+    { url = "https://files.pythonhosted.org/packages/63/6e/c595d3288161ae65b153788b0a2e64e742b27f060721dd49961479d80667/jax_bidirectional_tree_rake_compress-0.3.0-py3-none-any.whl", hash = "sha256:ddbc4ff06a5514ce866345429db172c787fa11b5f756f1e57bc5acbf0b49e9af", size = 17231, upload-time = "2026-07-22T22:58:01.416Z" },
 ]
 
 [[package]]
@@ -1420,12 +1420,12 @@ requires-dist = [
     { name = "imageio", extras = ["ffmpeg"], marker = "extra == 'mpc-examples'" },
     { name = "jax", extras = ["cpu"], marker = "sys_platform != 'linux'" },
     { name = "jax", extras = ["cuda12"], marker = "sys_platform == 'linux'" },
-    { name = "jax-bidirectional-tree-rake-compress", specifier = "==0.2.0" },
+    { name = "jax-bidirectional-tree-rake-compress", specifier = "==0.3.0" },
     { name = "matplotlib", marker = "extra == 'mpc-examples'" },
     { name = "matplotlib", marker = "extra == 'test'" },
     { name = "mujoco", marker = "extra == 'mpc-examples'" },
     { name = "mujoco-mjx", marker = "extra == 'mpc-examples'" },
-    { name = "regularized-lqr-jax", git = "https://github.com/joaospinto/regularized_lqr_jax?rev=309556f677f89c6f3ea980a11108e8c7faf3ac6d" },
+    { name = "regularized-lqr-jax", git = "https://github.com/joaospinto/regularized_lqr_jax?rev=af2f5c897a2c580af2722ce3431819bb07e718ca" },
     { name = "ruff", marker = "extra == 'lint'" },
 ]
 provides-extras = ["test", "lint", "mpc-examples"]
@@ -1575,7 +1575,7 @@ wheels = [
 [[package]]
 name = "regularized-lqr-jax"
 version = "0.0.1"
-source = { git = "https://github.com/joaospinto/regularized_lqr_jax?rev=309556f677f89c6f3ea980a11108e8c7faf3ac6d#309556f677f89c6f3ea980a11108e8c7faf3ac6d" }
+source = { git = "https://github.com/joaospinto/regularized_lqr_jax?rev=af2f5c897a2c580af2722ce3431819bb07e718ca#af2f5c897a2c580af2722ce3431819bb07e718ca" }
 dependencies = [
     { name = "absl-py" },
     { name = "jax" },

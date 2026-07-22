@@ -9,6 +9,7 @@ import jax
 import numpy as np
 from jax import numpy as jnp
 from jax_bidirectional_tree_rake_compress import (
+    ContractionExecutor,
     ContractionSchedule,
     TreeContractionPlan,
     make_tree_contraction_plan,
@@ -74,7 +75,12 @@ def make_tree_ocp_topology(
         if use_parallel_lqr
         else ContractionSchedule.RAKE_ONLY
     )
-    plan = make_tree_contraction_plan(parents, root=root, schedule=schedule)
+    plan = make_tree_contraction_plan(
+        parents,
+        root=root,
+        schedule=schedule,
+        executor=ContractionExecutor.AUTO,
+    )
     return TreeOCPTopology(plan=plan, use_parallel_lqr=use_parallel_lqr)
 
 

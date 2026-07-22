@@ -10,8 +10,9 @@ from regularized_lqr_jax.solver import (
     solve,
     solve_parallel,
 )
-from regularized_lqr_jax.tree_solver import factor_tree_parallel, solve_tree_parallel
+from regularized_lqr_jax.tree_solver import factor_tree, solve_tree
 from regularized_lqr_jax.types import FactorizationInputs as LQRFactorizationInputs
+from regularized_lqr_jax.types import FactorizationOutputs as LQRFactorizationOutputs
 from regularized_lqr_jax.types import SolveInputs as LQRSolveInputs
 from regularized_lqr_jax.types import SolveOutputs as LQRSolveOutputs
 
@@ -43,7 +44,7 @@ def _regularized_inequality_weight(inputs: KKTFactorizationInputs) -> NodeAndEdg
 @partial(jax.jit, static_argnames=("use_parallel_lqr",))
 def lqr_solve_kkt(
     lqr_inputs: LQRFactorizationInputs,
-    lqr_outputs: jax.Array,
+    lqr_outputs: LQRFactorizationOutputs,
     factorization_inputs: KKTFactorizationInputs,
     rhs: TreeVariables,
     use_parallel_lqr: bool,
@@ -93,7 +94,7 @@ def lqr_solve_kkt(
             solve_inputs=solve_inputs,
         )
     else:
-        solve_outputs = solve_tree_parallel(
+        solve_outputs = solve_tree(
             topology.plan,
             factorization_inputs=lqr_inputs,
             factorization_outputs=lqr_outputs,
@@ -181,7 +182,7 @@ def factor_kkt(
         factor_fn = factor_parallel if use_parallel_lqr else factor
         lqr_outputs = factor_fn(lqr_inputs)
     else:
-        lqr_outputs = factor_tree_parallel(topology.plan, lqr_inputs)
+        lqr_outputs = factor_tree(topology.plan, lqr_inputs)
 
     H_theta_X_T = jnp.moveaxis(inputs.H_theta_X, -1, 0)
     H_theta_U_T = jnp.moveaxis(inputs.H_theta_U, -1, 0)

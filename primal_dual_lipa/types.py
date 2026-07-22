@@ -9,10 +9,7 @@ from regularized_lqr_jax.types import (
     FactorizationInputs as LQRFactorizationInputs,
 )
 from regularized_lqr_jax.types import (
-    ParallelFactorizationOutputs as LQRParallelFactorizationOutputs,
-)
-from regularized_lqr_jax.types import (
-    SequentialFactorizationOutputs as LQRSequentialFactorizationOutputs,
+    FactorizationOutputs as LQRFactorizationOutputs,
 )
 
 
@@ -221,7 +218,7 @@ class KKTFactorizationOutputs:
     """KKT factorization outputs."""
 
     lqr_inputs: LQRFactorizationInputs
-    lqr_outputs: LQRSequentialFactorizationOutputs | LQRParallelFactorizationOutputs
+    lqr_outputs: LQRFactorizationOutputs
     schur_complement: jax.Array
     B_inv_C_X: jax.Array
     B_inv_C_U: jax.Array
