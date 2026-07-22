@@ -166,11 +166,15 @@ def _dense_tree_kkt(topology, inputs) -> np.ndarray:  # noqa: PLR0915
 class TestTreeKKT(unittest.TestCase):
     """Verify the full branching KKT matrix independently."""
 
-    def test_permuted_root_tree_matches_independent_dense_solve(  # noqa: PLR0915
+    def test_permuted_root_tree_matches_independent_dense_solve(  # noqa: C901, PLR0915
         self,
     ) -> None:
         """Compare tree Riccati recovery with a direct dense solve."""
-        topology = make_tree_ocp_topology([2, 2, -1, 0, 0])
+        parent_nodes = [2, 2, -1, 0, 0]
+        topology = make_tree_ocp_topology(
+            parent_nodes,
+            use_parallel_lqr=False,
+        )
         V, E = topology.num_nodes, topology.num_edges
 
         def dynamics(x, u, theta, edge):
@@ -386,29 +390,42 @@ class TestTreeKKT(unittest.TestCase):
             assembled_gradient, expected_gradient, atol=2e-10, rtol=2e-10
         )
 
-        factorization = factor_kkt(
-            system.lhs, use_parallel_lqr=False, topology=topology
-        )
-        solution = solve_kkt(
-            factorization,
-            system.lhs,
-            system.rhs,
-            use_parallel_lqr=False,
-            topology=topology,
-        )
         dense_solution = np.linalg.solve(
             _dense_tree_kkt(topology, system.lhs), -_flatten_variables(system.rhs)
         )
-        np.testing.assert_allclose(
-            _flatten_variables(solution), dense_solution, atol=3e-9, rtol=3e-9
-        )
+        for use_parallel_lqr in (False, True):
+            selected_topology = make_tree_ocp_topology(
+                parent_nodes,
+                use_parallel_lqr=use_parallel_lqr,
+            )
+            factorization = factor_kkt(
+                system.lhs,
+                use_parallel_lqr=use_parallel_lqr,
+                topology=selected_topology,
+            )
+            solution = solve_kkt(
+                factorization,
+                system.lhs,
+                system.rhs,
+                use_parallel_lqr=use_parallel_lqr,
+                topology=selected_topology,
+            )
+            np.testing.assert_allclose(
+                _flatten_variables(solution),
+                dense_solution,
+                atol=3e-9,
+                rtol=3e-9,
+            )
 
-        residual = compute_kkt_residual(
-            system.lhs, system.rhs, solution, topology=topology
-        )
-        np.testing.assert_allclose(
-            _flatten_variables(residual), 0.0, atol=2e-9, rtol=2e-9
-        )
+            residual = compute_kkt_residual(
+                system.lhs,
+                system.rhs,
+                solution,
+                topology=selected_topology,
+            )
+            np.testing.assert_allclose(
+                _flatten_variables(residual), 0.0, atol=2e-9, rtol=2e-9
+            )
 
 
 if __name__ == "__main__":

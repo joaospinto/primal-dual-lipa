@@ -626,15 +626,15 @@ cuda12 = [
 
 [[package]]
 name = "jax-bidirectional-tree-rake-compress"
-version = "0.1.0"
+version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jax" },
     { name = "numpy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/32/fc/bc3b301cd08dead3f4fd63acecc37b58c5af5a5877af7f32e7cf1950e264/jax_bidirectional_tree_rake_compress-0.1.0.tar.gz", hash = "sha256:61c6a50e89f1acc9863755101e3819ba503942a56928143c7b536b6c2f0198b1", size = 22938, upload-time = "2026-07-21T07:34:09.123Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f9/3a/452fb4bf26551de7ee7027419953922080d7e85823362fd0f8085e7d22ec/jax_bidirectional_tree_rake_compress-0.2.0.tar.gz", hash = "sha256:841bc6370bbc7e693b54b8df5e53b648c3f2a782d01d3f0d66c6c3f4d55e2d2b", size = 23564, upload-time = "2026-07-22T18:37:13.808Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ea/78/fe6d315d9bd50d434be71d4f2df693d8b84961b7f967b9247c6c3f62707c/jax_bidirectional_tree_rake_compress-0.1.0-py3-none-any.whl", hash = "sha256:71a5683962bd581be6bb35d8b88665f3f716a92e35fea55ba05af5c800f632fb", size = 12180, upload-time = "2026-07-21T07:34:07.838Z" },
+    { url = "https://files.pythonhosted.org/packages/b2/de/9075c6986aed5e1fe5735e1b4711ba535bceb3d62064f8b0574c4634df89/jax_bidirectional_tree_rake_compress-0.2.0-py3-none-any.whl", hash = "sha256:893c6f309b98c199ae48e70d5968f71441657b94fcbc8cc2f3a46c66aa316780", size = 12414, upload-time = "2026-07-22T18:37:12.681Z" },
 ]
 
 [[package]]
@@ -1384,6 +1384,7 @@ dependencies = [
     { name = "jax" },
     { name = "jax", marker = "sys_platform != 'linux'" },
     { name = "jax", extra = ["cuda12"], marker = "sys_platform == 'linux'" },
+    { name = "jax-bidirectional-tree-rake-compress" },
     { name = "regularized-lqr-jax" },
 ]
 
@@ -1419,6 +1420,7 @@ requires-dist = [
     { name = "imageio", extras = ["ffmpeg"], marker = "extra == 'mpc-examples'" },
     { name = "jax", extras = ["cpu"], marker = "sys_platform != 'linux'" },
     { name = "jax", extras = ["cuda12"], marker = "sys_platform == 'linux'" },
+    { name = "jax-bidirectional-tree-rake-compress", specifier = "==0.2.0" },
     { name = "matplotlib", marker = "extra == 'mpc-examples'" },
     { name = "matplotlib", marker = "extra == 'test'" },
     { name = "mujoco", marker = "extra == 'mpc-examples'" },

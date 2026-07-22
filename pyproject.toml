@@ -5,6 +5,7 @@ requires-python = ">= 3.12"
 dependencies = [
   "jax[cpu]; platform_system != \"Linux\"",
   "jax[cuda12]; platform_system == \"Linux\"",
+  "jax-bidirectional-tree-rake-compress==0.2.0",
   "regularized_lqr_jax @ git+https://github.com/joaospinto/regularized_lqr_jax@309556f677f89c6f3ea980a11108e8c7faf3ac6d",
 ]
 authors = [

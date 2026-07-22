@@ -145,7 +145,7 @@ def make_battery_multibranch_problem(*, print_logs: bool = True) -> TreeTestProb
         ],
         dtype=np.int32,
     )
-    topology = make_tree_ocp_topology(parents)
+    topology = make_tree_ocp_topology(parents, use_parallel_lqr=True)
 
     X_init = np.zeros((parents.size, 1))
     X_init[1, 0] = 1.0
@@ -404,7 +404,7 @@ def make_balanced_field_problem(  # noqa: C901, PLR0915
     climb_final = climb_node
 
     parents_array = np.asarray(parents, dtype=np.int32)
-    topology = make_tree_ocp_topology(parents_array)
+    topology = make_tree_ocp_topology(parents_array, use_parallel_lqr=True)
     edge_children_host = np.asarray(topology.plan.edge_children)
     edge_kind = jnp.asarray(np.asarray(edge_kind_by_child)[edge_children_host])
     duration_index = jnp.asarray(

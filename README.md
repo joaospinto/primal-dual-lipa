@@ -48,7 +48,10 @@ from primal_dual_lipa.optimizers import solve_tree
 from primal_dual_lipa.topology import make_tree_ocp_topology
 from primal_dual_lipa.types import NodeAndEdgeIndices, OCPCallbackLocations
 
-topology = make_tree_ocp_topology([-1, 0, 0, 1, 1])
+topology = make_tree_ocp_topology(
+    [-1, 0, 0, 1, 1],
+    use_parallel_lqr=settings.use_parallel_lqr,
+)
 locations = OCPCallbackLocations(
     cost=NodeAndEdgeIndices(node=jnp.array([3, 4]), edge=jnp.arange(4)),
     equalities=NodeAndEdgeIndices(

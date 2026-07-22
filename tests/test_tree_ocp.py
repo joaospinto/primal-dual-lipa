@@ -6,6 +6,7 @@ import unittest
 
 import jax
 from jax import numpy as jnp
+from jax_bidirectional_tree_rake_compress import plan_statistics
 
 from primal_dual_lipa.optimizers import solve, solve_tree
 from primal_dual_lipa.topology import make_tree_ocp_topology
@@ -44,9 +45,79 @@ def _empty_tree_variables(num_nodes: int) -> TreeVariables:
 class TestTreeOCPSolve(unittest.TestCase):
     """Verify tree topology, objective ownership, and chain compatibility."""
 
+    def test_tree_schedule_follows_parallel_setting(self) -> None:
+        """Sequential tree solves use rake-only plans; parallel solves compress."""
+        parents = [-1, 0, 1, 1, 3, 4, 0]
+        parallel = make_tree_ocp_topology(parents, use_parallel_lqr=True)
+        sequential = make_tree_ocp_topology(parents, use_parallel_lqr=False)
+
+        self.assertTrue(parallel.use_parallel_lqr)  # noqa: PT009
+        self.assertFalse(sequential.use_parallel_lqr)  # noqa: PT009
+        self.assertGreater(plan_statistics(parallel.plan).num_compressions, 0)  # noqa: PT009
+        self.assertEqual(plan_statistics(sequential.plan).num_compressions, 0)  # noqa: PT009
+
+        with self.assertRaisesRegex(ValueError, "topology was created with"):  # noqa: PT027
+            solve_tree(
+                vars_in=_empty_tree_variables(sequential.num_nodes),
+                x0=jnp.zeros(1),
+                dynamics=lambda x, u, theta, edge: x,
+                settings=SolverSettings(max_iterations=0, use_parallel_lqr=True),
+                topology=sequential,
+            )
+
+    def test_sequential_and_parallel_tree_schedules_match(self) -> None:
+        """Both schedules solve the same depth-two branching quadratic OCP."""
+        parents = [-1, 0, 0, 1, 2]
+        goals = jnp.array([2.0, -3.0])
+        first_leaf = 3
+
+        def dynamics(x, u, theta, edge):
+            del theta, edge
+            return x + u
+
+        def node_cost(x, theta, node):
+            del theta
+            goal = goals[jnp.clip(node - first_leaf, 0, goals.shape[0] - 1)]
+            return jnp.where(
+                node >= first_leaf,
+                0.5 * jnp.square(x[0] - goal),
+                0.0,
+            )
+
+        def edge_cost(x, u, theta, edge):
+            del x, theta, edge
+            return 0.5 * jnp.square(u[0])
+
+        results = []
+        for use_parallel_lqr in (False, True):
+            with self.subTest(use_parallel_lqr=use_parallel_lqr):
+                topology = make_tree_ocp_topology(
+                    parents,
+                    use_parallel_lqr=use_parallel_lqr,
+                )
+                result, iterations, no_errors, _ = solve_tree(
+                    vars_in=_empty_tree_variables(topology.num_nodes),
+                    x0=jnp.array([0.5]),
+                    dynamics=dynamics,
+                    settings=SolverSettings(
+                        residual_sq_threshold=1e-20,
+                        num_iterative_refinement_steps=1,
+                        use_parallel_lqr=use_parallel_lqr,
+                    ),
+                    node_cost=node_cost,
+                    edge_cost=edge_cost,
+                    topology=topology,
+                )
+                self.assertTrue(bool(no_errors))  # noqa: PT009
+                self.assertLess(int(iterations), 20)  # noqa: PT009
+                results.append(result)
+
+        self.assertTrue(jnp.allclose(results[0].X, results[1].X, atol=1e-8))  # noqa: PT009
+        self.assertTrue(jnp.allclose(results[0].U, results[1].U, atol=1e-8))  # noqa: PT009
+
     def test_star_tree_matches_analytic_solution(self) -> None:
         """Solve two independent child branches sharing a fixed root state."""
-        topology = make_tree_ocp_topology([-1, 0, 0])
+        topology = make_tree_ocp_topology([-1, 0, 0], use_parallel_lqr=True)
         goals = jnp.array([2.0, -4.0])
 
         def dynamics(x, u, theta, edge):
@@ -87,7 +158,7 @@ class TestTreeOCPSolve(unittest.TestCase):
 
     def test_single_node_tree(self) -> None:
         """A root-only tree has one node and no edge controls."""
-        topology = make_tree_ocp_topology([-1])
+        topology = make_tree_ocp_topology([-1], use_parallel_lqr=False)
         variables = _empty_tree_variables(1)
 
         result, iterations, no_errors, _ = solve_tree(
@@ -107,7 +178,10 @@ class TestTreeOCPSolve(unittest.TestCase):
     def test_explicit_chain_topology_matches_simple_solve(self) -> None:
         """The simple chain facade and explicit tree API use the same solver path."""
         horizon = 3
-        topology = make_tree_ocp_topology([-1, 0, 1, 2])
+        topology = make_tree_ocp_topology(
+            [-1, 0, 1, 2],
+            use_parallel_lqr=False,
+        )
 
         def dynamics(x, u, theta, stage):
             del theta, stage
@@ -189,7 +263,7 @@ class TestTreeOCPSolve(unittest.TestCase):
 
     def test_constrained_tree_reaches_branch_terminal_targets(self) -> None:
         """Exercise tree equality, inequality, slack, and barrier bookkeeping."""
-        topology = make_tree_ocp_topology([-1, 0, 0])
+        topology = make_tree_ocp_topology([-1, 0, 0], use_parallel_lqr=False)
         goals = jnp.array([0.4, -0.6])
 
         def dynamics(x, u, theta, edge):
@@ -267,7 +341,7 @@ class TestTreeOCPSolve(unittest.TestCase):
 
     def test_invalid_tree_variable_layout_is_reported(self) -> None:
         """Reject a local-stage warm start with the wrong row count."""
-        topology = make_tree_ocp_topology([-1, 0, 0])
+        topology = make_tree_ocp_topology([-1, 0, 0], use_parallel_lqr=False)
         all_nodes = jnp.arange(topology.num_nodes, dtype=jnp.int32)
         all_edges = jnp.arange(topology.num_edges, dtype=jnp.int32)
         all_locations = NodeAndEdgeIndices(node=all_nodes, edge=all_edges)

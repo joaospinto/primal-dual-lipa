@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import jax
 import numpy as np
 from jax import numpy as jnp
 from jax_bidirectional_tree_rake_compress import (
+    ContractionSchedule,
     TreeContractionPlan,
     make_tree_contraction_plan,
 )
@@ -22,7 +24,9 @@ from primal_dual_lipa.types import (
 )
 
 
-class TreeOCPTopology(NamedTuple):
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True, eq=False)
+class TreeOCPTopology:
     """Static rooted-tree layout used by the nonlinear OCP solver.
 
     Node arrays retain the caller's node order. Edge arrays follow
@@ -30,6 +34,21 @@ class TreeOCPTopology(NamedTuple):
     """
 
     plan: TreeContractionPlan
+    use_parallel_lqr: bool
+
+    def tree_flatten(self) -> tuple[tuple[TreeContractionPlan], bool]:
+        """Keep the solver mode as static PyTree metadata."""
+        return (self.plan,), self.use_parallel_lqr
+
+    @classmethod
+    def tree_unflatten(
+        cls,
+        use_parallel_lqr: bool,
+        children: tuple[TreeContractionPlan],
+    ) -> TreeOCPTopology:
+        """Reconstruct a topology after a JAX transformation."""
+        (plan,) = children
+        return cls(plan=plan, use_parallel_lqr=use_parallel_lqr)
 
     @property
     def num_nodes(self) -> int:
@@ -45,10 +64,35 @@ class TreeOCPTopology(NamedTuple):
 def make_tree_ocp_topology(
     parents: ArrayLike,
     *,
+    use_parallel_lqr: bool,
     root: int | None = None,
 ) -> TreeOCPTopology:
-    """Validate and preprocess a rooted-tree OCP topology on the host."""
-    return TreeOCPTopology(plan=make_tree_contraction_plan(parents, root=root))
+    """Validate and preprocess one rooted-tree schedule on the host."""
+    use_parallel_lqr = bool(use_parallel_lqr)
+    schedule = (
+        ContractionSchedule.RAKE_COMPRESS
+        if use_parallel_lqr
+        else ContractionSchedule.RAKE_ONLY
+    )
+    plan = make_tree_contraction_plan(parents, root=root, schedule=schedule)
+    return TreeOCPTopology(plan=plan, use_parallel_lqr=use_parallel_lqr)
+
+
+def validate_tree_ocp_schedule(
+    topology: TreeOCPTopology | None,
+    *,
+    use_parallel_lqr: bool,
+) -> None:
+    """Reject a topology planned for a different LQR execution mode."""
+    if topology is None:
+        return
+    if topology.use_parallel_lqr != bool(use_parallel_lqr):
+        message = (
+            "topology was created with "
+            f"use_parallel_lqr={topology.use_parallel_lqr}, but solver settings "
+            f"use_parallel_lqr={bool(use_parallel_lqr)}"
+        )
+        raise ValueError(message)
 
 
 def root_node(topology: TreeOCPTopology | None) -> jax.Array | int:

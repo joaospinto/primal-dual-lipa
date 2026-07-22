@@ -25,6 +25,7 @@ from primal_dual_lipa.lagrangian_helpers import (
 from primal_dual_lipa.topology import (
     TreeOCPTopology,
     validate_callback_locations,
+    validate_tree_ocp_schedule,
     validate_tree_shapes,
 )
 from primal_dual_lipa.types import (
@@ -1206,6 +1207,10 @@ def solve_tree(
     follow the corresponding selected-index order. If omitted, every callback
     is evaluated at every node and edge.
     """
+    validate_tree_ocp_schedule(
+        topology,
+        use_parallel_lqr=bool(settings.use_parallel_lqr),
+    )
     if locations is None:
         locations = _all_callback_locations(vars_in.X.shape[0], vars_in.U.shape[0])
     locations = validate_callback_locations(
