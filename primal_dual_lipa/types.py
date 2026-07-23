@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import Enum
 
 import jax
 from jax import numpy as jnp
@@ -11,6 +12,24 @@ from regularized_lqr_jax.types import (
 from regularized_lqr_jax.types import (
     FactorizationOutputs as LQRFactorizationOutputs,
 )
+
+
+class SolverMode(Enum):
+    """Interpretation of the regularization in the Newton-KKT system."""
+
+    REGULARIZED_IPM = "regularized_ipm"
+    PRIMAL_PROXIMAL_IPM = "primal_proximal_ipm"
+    PRIMAL_DUAL_PROXIMAL_IPM = "primal_dual_proximal_ipm"
+
+    @property
+    def uses_primal_center(self) -> bool:
+        """Whether primal Hessian regularization defines a proximal term."""
+        return self is not SolverMode.REGULARIZED_IPM
+
+    @property
+    def uses_dual_center(self) -> bool:
+        """Whether augmented-Lagrangian dual regularization is proximal."""
+        return self is SolverMode.PRIMAL_DUAL_PROXIMAL_IPM
 
 
 @jax.tree_util.register_dataclass
@@ -107,6 +126,10 @@ class SolverSettings:
     print_ls_logs: jnp.bool = field(default=False, metadata={"static": True})
     hessian_regularization: HessianRegularizationSettings = field(
         default_factory=HessianRegularizationSettings
+    )
+    mode: SolverMode = field(
+        default=SolverMode.REGULARIZED_IPM,
+        metadata={"static": True},
     )
 
 

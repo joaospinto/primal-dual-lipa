@@ -17,6 +17,7 @@ from primal_dual_lipa.types import (
     NodeCostFunction,
     NodeFunction,
     OCPCallbackLocations,
+    SolverMode,
     TreeParameters,
     TreeVariables,
     node_edge_map,
@@ -154,6 +155,19 @@ def dynamics_residuals(
     )
 
 
+def _dual_proximal_term(
+    residual: jax.Array,
+    dual: jax.Array,
+    center: jax.Array,
+    eta: jax.Array,
+) -> jnp.double:
+    regularized_residual = residual - (dual - center) / eta
+    return jnp.sum(
+        center * residual
+        + 0.5 * eta * (jnp.square(residual) + jnp.square(regularized_residual))
+    )
+
+
 def build_total_augmented_lagrangian(  # noqa: ANN201
     node_cost: NodeCostFunction,
     edge_cost: EdgeCostFunction,
@@ -166,6 +180,9 @@ def build_total_augmented_lagrangian(  # noqa: ANN201
     params: TreeParameters,
     topology: TreeOCPTopology | None,
     locations: OCPCallbackLocations,
+    mode: SolverMode,
+    hessian_regularization: jnp.double,
+    reference_variables: TreeVariables,
 ):
     """Return a function evaluating the associated augmented Lagrangian."""
     node_equality_lagrangian = build_node_equality_lagrangian(node_equalities)
@@ -179,11 +196,6 @@ def build_total_augmented_lagrangian(  # noqa: ANN201
     dynamics_lagrangian = build_dynamics_lagrangian(dynamics)
 
     def augmented_lagrangian(variables: TreeVariables) -> jnp.double:
-        num_edges = variables.U.shape[0]
-        parents = edge_parents(topology, num_edges)
-        children = edge_children(topology, num_edges)
-        root = root_node(topology)
-        edge_indices = jnp.arange(num_edges, dtype=jnp.int32)
         local_cost = node_edge_sum(
             evaluate_node_edge(
                 node_cost,
@@ -195,49 +207,7 @@ def build_total_augmented_lagrangian(  # noqa: ANN201
                 locations.cost,
             )
         )
-        local_node_equality = vectorize_node(node_equality_lagrangian)(
-            variables.X[locations.equalities.node],
-            variables.Theta,
-            locations.equalities.node,
-            variables.Y_eq.node,
-        ).sum()
-        local_node_inequality = vectorize_node(node_inequality_lagrangian)(
-            variables.X[locations.inequalities.node],
-            variables.Theta,
-            locations.inequalities.node,
-            variables.S.node,
-            variables.Z.node,
-        ).sum()
-        equality_edges = locations.equalities.edge
-        local_edge_equality = vectorize_edge(edge_equality_lagrangian)(
-            variables.X[parents[equality_edges]],
-            variables.U[equality_edges],
-            variables.Theta,
-            equality_edges,
-            variables.Y_eq.edge,
-        ).sum()
-        inequality_edges = locations.inequalities.edge
-        local_edge_inequality = vectorize_edge(edge_inequality_lagrangian)(
-            variables.X[parents[inequality_edges]],
-            variables.U[inequality_edges],
-            variables.Theta,
-            inequality_edges,
-            variables.S.edge,
-            variables.Z.edge,
-        ).sum()
-        dynamics_term = vectorize_edge(dynamics_lagrangian)(
-            variables.X[parents],
-            variables.U,
-            variables.Theta,
-            edge_indices,
-            variables.Y_dyn[children],
-        ).sum()
-        state_term = -jnp.sum(variables.Y_dyn * variables.X) + jnp.dot(
-            variables.Y_dyn[root], x0
-        )
-
         dyn_residual = dynamics_residuals(dynamics, x0, variables, topology)
-        dyn_penalty = 0.5 * jnp.sum(params.η_dyn * jnp.square(dyn_residual))
         equality_residual = evaluate_node_edge(
             node_equalities,
             edge_equalities,
@@ -246,10 +216,6 @@ def build_total_augmented_lagrangian(  # noqa: ANN201
             variables.Theta,
             topology,
             locations.equalities,
-        )
-        equality_penalty = 0.5 * (
-            jnp.sum(params.η_eq.node * jnp.square(equality_residual.node))
-            + jnp.sum(params.η_eq.edge * jnp.square(equality_residual.edge))
         )
         inequality_residual = node_edge_map(
             lambda value, slack: value + slack,
@@ -264,22 +230,121 @@ def build_total_augmented_lagrangian(  # noqa: ANN201
             ),
             variables.S,
         )
-        inequality_penalty = 0.5 * (
-            jnp.sum(params.η_ineq.node * jnp.square(inequality_residual.node))
-            + jnp.sum(params.η_ineq.edge * jnp.square(inequality_residual.edge))
-        )
-        return (
-            local_cost
-            + local_node_equality
-            + local_node_inequality
-            + local_edge_equality
-            + local_edge_inequality
-            + dynamics_term
-            + state_term
-            + dyn_penalty
-            + equality_penalty
-            + inequality_penalty
-        )
+        if mode.uses_dual_center:
+            barrier = -params.µ * node_edge_sum(node_edge_map(jnp.log, variables.S))
+            merit = (
+                local_cost
+                + barrier
+                + _dual_proximal_term(
+                    dyn_residual,
+                    variables.Y_dyn,
+                    reference_variables.Y_dyn,
+                    params.η_dyn,
+                )
+                + _dual_proximal_term(
+                    equality_residual.node,
+                    variables.Y_eq.node,
+                    reference_variables.Y_eq.node,
+                    params.η_eq.node,
+                )
+                + _dual_proximal_term(
+                    equality_residual.edge,
+                    variables.Y_eq.edge,
+                    reference_variables.Y_eq.edge,
+                    params.η_eq.edge,
+                )
+                + _dual_proximal_term(
+                    inequality_residual.node,
+                    variables.Z.node,
+                    reference_variables.Z.node,
+                    params.η_ineq.node,
+                )
+                + _dual_proximal_term(
+                    inequality_residual.edge,
+                    variables.Z.edge,
+                    reference_variables.Z.edge,
+                    params.η_ineq.edge,
+                )
+            )
+        else:
+            num_edges = variables.U.shape[0]
+            parents = edge_parents(topology, num_edges)
+            children = edge_children(topology, num_edges)
+            root = root_node(topology)
+            edge_indices = jnp.arange(num_edges, dtype=jnp.int32)
+            local_node_equality = vectorize_node(node_equality_lagrangian)(
+                variables.X[locations.equalities.node],
+                variables.Theta,
+                locations.equalities.node,
+                variables.Y_eq.node,
+            ).sum()
+            local_node_inequality = vectorize_node(node_inequality_lagrangian)(
+                variables.X[locations.inequalities.node],
+                variables.Theta,
+                locations.inequalities.node,
+                variables.S.node,
+                variables.Z.node,
+            ).sum()
+            equality_edges = locations.equalities.edge
+            local_edge_equality = vectorize_edge(edge_equality_lagrangian)(
+                variables.X[parents[equality_edges]],
+                variables.U[equality_edges],
+                variables.Theta,
+                equality_edges,
+                variables.Y_eq.edge,
+            ).sum()
+            inequality_edges = locations.inequalities.edge
+            local_edge_inequality = vectorize_edge(edge_inequality_lagrangian)(
+                variables.X[parents[inequality_edges]],
+                variables.U[inequality_edges],
+                variables.Theta,
+                inequality_edges,
+                variables.S.edge,
+                variables.Z.edge,
+            ).sum()
+            dynamics_term = vectorize_edge(dynamics_lagrangian)(
+                variables.X[parents],
+                variables.U,
+                variables.Theta,
+                edge_indices,
+                variables.Y_dyn[children],
+            ).sum()
+            state_term = -jnp.sum(variables.Y_dyn * variables.X) + jnp.dot(
+                variables.Y_dyn[root], x0
+            )
+            dyn_penalty = 0.5 * jnp.sum(params.η_dyn * jnp.square(dyn_residual))
+            equality_penalty = 0.5 * (
+                jnp.sum(params.η_eq.node * jnp.square(equality_residual.node))
+                + jnp.sum(params.η_eq.edge * jnp.square(equality_residual.edge))
+            )
+            inequality_penalty = 0.5 * (
+                jnp.sum(params.η_ineq.node * jnp.square(inequality_residual.node))
+                + jnp.sum(params.η_ineq.edge * jnp.square(inequality_residual.edge))
+            )
+            merit = (
+                local_cost
+                + local_node_equality
+                + local_node_inequality
+                + local_edge_equality
+                + local_edge_inequality
+                + dynamics_term
+                + state_term
+                + dyn_penalty
+                + equality_penalty
+                + inequality_penalty
+            )
+
+        if mode.uses_primal_center:
+            merit += (
+                0.5
+                * hessian_regularization
+                * (
+                    jnp.sum(jnp.square(variables.X - reference_variables.X))
+                    + jnp.sum(jnp.square(variables.U - reference_variables.U))
+                    + jnp.sum(jnp.square(variables.Theta - reference_variables.Theta))
+                )
+            )
+        return merit
 
     return augmented_lagrangian
 
@@ -299,6 +364,8 @@ def directional_augmented_lagrangian(  # noqa: ANN201
     locations: OCPCallbackLocations,
     variables: TreeVariables,
     deltas: TreeVariables,
+    mode: SolverMode,
+    hessian_regularization: jnp.double,
 ):
     """Define the directional augmented Lagrangian used in line search."""
     augmented_lagrangian = build_total_augmented_lagrangian(
@@ -313,6 +380,9 @@ def directional_augmented_lagrangian(  # noqa: ANN201
         params=params,
         topology=topology,
         locations=locations,
+        mode=mode,
+        hessian_regularization=hessian_regularization,
+        reference_variables=variables,
     )
 
     def dal(α: jnp.double) -> jnp.double:
@@ -327,9 +397,31 @@ def directional_augmented_lagrangian(  # noqa: ANN201
                     variables.S,
                     deltas.S,
                 ),
-                Y_dyn=variables.Y_dyn,
-                Y_eq=variables.Y_eq,
-                Z=variables.Z,
+                Y_dyn=(
+                    variables.Y_dyn + α * deltas.Y_dyn
+                    if mode.uses_dual_center
+                    else variables.Y_dyn
+                ),
+                Y_eq=(
+                    node_edge_map(
+                        lambda value, delta: value + α * delta,
+                        variables.Y_eq,
+                        deltas.Y_eq,
+                    )
+                    if mode.uses_dual_center
+                    else variables.Y_eq
+                ),
+                Z=(
+                    node_edge_map(
+                        lambda value, delta: jnp.maximum(
+                            value + α * delta, (1.0 - τ) * value
+                        ),
+                        variables.Z,
+                        deltas.Z,
+                    )
+                    if mode.uses_dual_center
+                    else variables.Z
+                ),
                 Theta=variables.Theta + α * deltas.Theta,
             )
         )

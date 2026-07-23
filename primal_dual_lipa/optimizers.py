@@ -237,9 +237,14 @@ def _solve_node_edge(
         )
 
     hess_reg_settings = settings.hessian_regularization
+    hessian_regularization_floor = (
+        jnp.maximum(hess_reg_settings.minimum, hess_reg_settings.first_positive)
+        if settings.mode.uses_primal_center
+        else hess_reg_settings.minimum
+    )
     hessian_regularization_current = jnp.maximum(
         hess_reg_settings.initial,
-        hess_reg_settings.minimum,
+        hessian_regularization_floor,
     )
 
     kkt_system = build_kkt(
@@ -328,6 +333,7 @@ def _solve_node_edge(
 
         def solve_trial(
             trial_kkt_system: KKTSystem,
+            trial_hessian_regularization: jnp.double,
         ) -> tuple[object, TreeVariables, jax.Array]:
             trial_factorization_outputs = factor_kkt(
                 inputs=trial_kkt_system.lhs,
@@ -364,6 +370,8 @@ def _solve_node_edge(
                 locations=locations,
                 variables=vars,
                 deltas=trial_deltas,
+                mode=settings.mode,
+                hessian_regularization=trial_hessian_regularization,
             )
             trial_merit_grad = jax.grad(trial_dal)(0.0)
             descent_valid = trial_merit_grad < -hess_reg_settings.descent_tol
@@ -373,7 +381,10 @@ def _solve_node_edge(
             )
             return trial_factorization_outputs, trial_deltas, valid
 
-        factorization_outputs, deltas, regularization_valid = solve_trial(kkt_system)
+        factorization_outputs, deltas, regularization_valid = solve_trial(
+            kkt_system,
+            hessian_regularization,
+        )
 
         def next_hessian_regularization(reg: jax.Array) -> jax.Array:
             from_zero = jnp.where(
@@ -422,7 +433,8 @@ def _solve_node_edge(
                 reg_new - reg,
             )
             trial_factorization_outputs, trial_deltas, valid = solve_trial(
-                trial_kkt_system
+                trial_kkt_system,
+                reg_new,
             )
             return (
                 reg_new,
@@ -525,6 +537,14 @@ def _solve_node_edge(
             compute_alpha_max(vars.S.node, deltas.S.node, τ),
             compute_alpha_max(vars.S.edge, deltas.S.edge, τ),
         )
+        if settings.mode.uses_dual_center:
+            α_max_z = jnp.minimum(
+                compute_alpha_max(vars.Z.node, deltas.Z.node, τ),
+                compute_alpha_max(vars.Z.edge, deltas.Z.edge, τ),
+            )
+            α_max = jnp.minimum(α_max_s, α_max_z)
+        else:
+            α_max = α_max_s
 
         dal = directional_augmented_lagrangian(
             node_cost=node_cost,
@@ -541,6 +561,8 @@ def _solve_node_edge(
             locations=locations,
             variables=vars,
             deltas=deltas,
+            mode=settings.mode,
+            hessian_regularization=hessian_regularization_used,
         )
 
         dal_x = directional_augmented_lagrangian(
@@ -566,6 +588,8 @@ def _solve_node_edge(
                 Z=node_edge_map(jnp.zeros_like, deltas.Z),
                 Theta=jnp.zeros_like(deltas.Theta),
             ),
+            mode=settings.mode,
+            hessian_regularization=hessian_regularization_used,
         )
 
         dal_s = directional_augmented_lagrangian(
@@ -591,6 +615,8 @@ def _solve_node_edge(
                 Z=node_edge_map(jnp.zeros_like, deltas.Z),
                 Theta=jnp.zeros_like(deltas.Theta),
             ),
+            mode=settings.mode,
+            hessian_regularization=hessian_regularization_used,
         )
 
         baseline_merit = dal(0.0)
@@ -749,12 +775,12 @@ def _solve_node_edge(
             return jnp.logical_not(found)
 
         if settings.skip_line_search:
-            α = α_max_s
+            α = α_max
         else:
             _, _, α = jax.lax.while_loop(
                 line_search_cond,
                 line_search_iteration,
-                (α_max_s, False, 0.0),
+                (α_max, False, 0.0),
             )
 
         if settings.print_logs:
@@ -1003,11 +1029,17 @@ def _solve_node_edge(
         decreased_hessian_regularization = (
             hessian_regularization_used * hess_reg_settings.decrease_factor
         )
-        decreased_hessian_regularization = jnp.where(
-            decreased_hessian_regularization < hess_reg_settings.first_positive,
-            hess_reg_settings.minimum,
-            decreased_hessian_regularization,
-        )
+        if settings.mode.uses_primal_center:
+            decreased_hessian_regularization = jnp.maximum(
+                hessian_regularization_floor,
+                decreased_hessian_regularization,
+            )
+        else:
+            decreased_hessian_regularization = jnp.where(
+                decreased_hessian_regularization < hess_reg_settings.first_positive,
+                hess_reg_settings.minimum,
+                decreased_hessian_regularization,
+            )
         hessian_regularization_new = jnp.where(
             regularization_valid,
             jnp.maximum(hess_reg_settings.minimum, decreased_hessian_regularization),
